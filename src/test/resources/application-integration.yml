@@ -1,0 +1,12 @@
+# 통합 테스트 전용 프로필 (IntegrationTestSupport에서 활성화)
+# 접속 정보(URL, 계정, Redis 포트)는 Testcontainers가 띄운 컨테이너 값으로 런타임에 주입된다.
+spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
