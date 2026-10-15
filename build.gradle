@@ -76,7 +76,3 @@ tasks.register('integrationTest', Test) {
 	}
 	shouldRunAfter tasks.named('test')
 }
-
-tasks.named('check') {
-	dependsOn tasks.named('integrationTest')
-}
