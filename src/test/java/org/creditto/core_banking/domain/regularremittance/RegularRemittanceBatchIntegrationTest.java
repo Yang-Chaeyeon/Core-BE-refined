@@ -1,0 +1,252 @@
+package org.creditto.core_banking.domain.regularremittance;
+
+import org.creditto.core_banking.domain.account.entity.Account;
+import org.creditto.core_banking.domain.account.entity.AccountState;
+import org.creditto.core_banking.domain.account.entity.AccountType;
+import org.creditto.core_banking.domain.account.repository.AccountRepository;
+import org.creditto.core_banking.domain.exchange.dto.ExchangeRateRes;
+import org.creditto.core_banking.domain.recipient.entity.Recipient;
+import org.creditto.core_banking.domain.recipient.repository.RecipientRepository;
+import org.creditto.core_banking.domain.regularremittance.entity.MonthlyRegularRemittance;
+import org.creditto.core_banking.domain.regularremittance.entity.RegRemStatus;
+import org.creditto.core_banking.domain.regularremittance.repository.MonthlyRegularRemittanceRepository;
+import org.creditto.core_banking.domain.regularremittance.service.RegularRemittanceScheduler;
+import org.creditto.core_banking.domain.remittancefee.entity.FlatServiceFee;
+import org.creditto.core_banking.domain.remittancefee.entity.NetworkFee;
+import org.creditto.core_banking.domain.remittancefee.entity.PctServiceFee;
+import org.creditto.core_banking.domain.remittancefee.repository.FlatServiceFeeRepository;
+import org.creditto.core_banking.domain.remittancefee.repository.NetworkFeeRepository;
+import org.creditto.core_banking.domain.remittancefee.repository.PctServiceFeeRepository;
+import org.creditto.core_banking.global.common.CurrencyCode;
+import org.creditto.core_banking.global.feign.ExchangeRateProvider;
+import org.creditto.core_banking.support.IntegrationTestSupport;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.lang.reflect.Constructor;
+import java.math.BigDecimal;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mockStatic;
+
+/**
+ * 실제 MySQL · Redis에서 월간 정기송금 배치를 실행해 트랜잭션 경계와 락 범위를 검증합니다.
+ *
+ * <p>테스트마다 다른 배치 날짜(예약일)를 사용해, 다른 테스트가 만든 정기송금이 함께 처리되지 않게 합니다.</p>
+ */
+@DisplayName("[통합] 월간 정기송금 배치")
+class RegularRemittanceBatchIntegrationTest extends IntegrationTestSupport {
+
+    private static final ZoneId ZONE_ID = ZoneId.of("Asia/Seoul");
+    private static final BigDecimal INITIAL_BALANCE = new BigDecimal("1000000");
+    private static final BigDecimal SEND_AMOUNT_USD = new BigDecimal("100");
+    private static final Map<String, ExchangeRateRes> RATES = Map.of(
+            "USD", ExchangeRateRes.builder()
+                    .currencyUnit("USD")
+                    .baseRate("1,400.00")
+                    .currencyName("미국 달러")
+                    .build()
+    );
+
+    @MockitoBean
+    private ExchangeRateProvider exchangeRateProvider;
+
+    @Autowired
+    private RegularRemittanceScheduler scheduler;
+
+    @Autowired
+    private AccountRepository accountRepository;
+
+    @Autowired
+    private RecipientRepository recipientRepository;
+
+    @Autowired
+    private MonthlyRegularRemittanceRepository monthlyRegularRemittanceRepository;
+
+    @Autowired
+    private FlatServiceFeeRepository flatServiceFeeRepository;
+
+    @Autowired
+    private PctServiceFeeRepository pctServiceFeeRepository;
+
+    @Autowired
+    private NetworkFeeRepository networkFeeRepository;
+
+    @Autowired
+    private TransactionTemplate transactionTemplate;
+
+    private Recipient recipient;
+
+    @BeforeEach
+    void setUp() {
+        given(exchangeRateProvider.getExchangeRates()).willReturn(RATES);
+
+        // 수수료 정책은 테스트 간에 공유되므로 없을 때만 저장
+        if (flatServiceFeeRepository.count() == 0) {
+            flatServiceFeeRepository.save(FlatServiceFee.of(null, new BigDecimal("999999999999"), new BigDecimal("5000")));
+        }
+        if (pctServiceFeeRepository.count() == 0) {
+            pctServiceFeeRepository.save(PctServiceFee.of(null, BigDecimal.ZERO, false));
+        }
+        if (networkFeeRepository.findByCurrencyCode(CurrencyCode.USD).isEmpty()) {
+            networkFeeRepository.save(NetworkFee.of(null, CurrencyCode.USD, BigDecimal.ONE));
+        }
+
+        recipient = recipientRepository.save(createRecipient());
+    }
+
+    @Test
+    @DisplayName("잔액 부족으로 1건이 실패해도 나머지 정기송금은 출금된다")
+    void oneFailure_doesNotRollbackOthers() {
+        LocalDate batchDate = LocalDate.of(2026, 10, 13); // 화요일
+
+        Account first = saveAccount(INITIAL_BALANCE);
+        Account poor = saveAccount(BigDecimal.ZERO);
+        Account last = saveAccount(INITIAL_BALANCE);
+
+        saveMonthlyRemittance(first, batchDate);
+        MonthlyRegularRemittance failing = saveMonthlyRemittance(poor, batchDate);
+        saveMonthlyRemittance(last, batchDate);
+
+        assertThatCode(() -> runMonthlyBatch(batchDate)).doesNotThrowAnyException();
+
+        assertThat(balanceOf(first)).isLessThan(INITIAL_BALANCE);
+        assertThat(balanceOf(last)).isLessThan(INITIAL_BALANCE);
+        assertThat(balanceOf(poor)).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(statusOf(failing)).isEqualTo(RegRemStatus.DELAYED);
+    }
+
+    @Test
+    @DisplayName("배치가 다음 건을 처리하는 동안, 이미 처리한 계좌의 잠금은 바로 얻을 수 있다")
+    void processedAccount_isNotLockedUntilBatchEnds() throws Exception {
+        LocalDate batchDate = LocalDate.of(2026, 10, 14); // 수요일
+
+        // 같은 계좌로 정기송금 3건: 1건 처리 후 다음 건을 처리하는 동안 계좌 잠금 여부를 확인
+        Account target = saveAccount(INITIAL_BALANCE);
+        saveMonthlyRemittance(target, batchDate);
+        saveMonthlyRemittance(target, batchDate);
+        saveMonthlyRemittance(target, batchDate);
+
+        // 2번째 건부터 환율 조회를 2초 지연시켜, 배치가 다음 건을 처리 중인 상태를 만든다
+        CountDownLatch firstItemDone = new CountDownLatch(1);
+        AtomicInteger exchangeCalls = new AtomicInteger();
+        given(exchangeRateProvider.getExchangeRates()).willAnswer(invocation -> {
+            if (exchangeCalls.incrementAndGet() >= 2) {
+                firstItemDone.countDown();
+                Thread.sleep(2000);
+            }
+            return RATES;
+        });
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Duration> lockWait = executor.submit(() -> {
+                if (!firstItemDone.await(60, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("배치가 첫 번째 건을 끝내지 못했습니다.");
+                }
+                long start = System.nanoTime();
+                transactionTemplate.executeWithoutResult(status ->
+                        accountRepository.findByIdForUpdate(target.getId()));
+                return Duration.ofNanos(System.nanoTime() - start);
+            });
+
+            runMonthlyBatch(batchDate);
+
+            assertThat(lockWait.get(60, TimeUnit.SECONDS)).isLessThan(Duration.ofSeconds(1));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    @DisplayName("같은 날 배치를 다시 실행해도 정기송금이 중복 출금되지 않는다")
+    void rerunOnSameDay_doesNotWithdrawTwice() {
+        LocalDate batchDate = LocalDate.of(2026, 10, 15); // 목요일
+
+        Account account = saveAccount(INITIAL_BALANCE);
+        saveMonthlyRemittance(account, batchDate);
+
+        runMonthlyBatch(batchDate);
+        BigDecimal balanceAfterFirstRun = balanceOf(account);
+
+        runMonthlyBatch(batchDate);
+
+        assertThat(balanceAfterFirstRun).isLessThan(INITIAL_BALANCE);
+        assertThat(balanceOf(account)).isEqualByComparingTo(balanceAfterFirstRun);
+    }
+
+    private void runMonthlyBatch(LocalDate batchDate) {
+        try (MockedStatic<LocalDate> mockedLocalDate = mockStatic(LocalDate.class, CALLS_REAL_METHODS)) {
+            mockedLocalDate.when(() -> LocalDate.now(ZONE_ID)).thenReturn(batchDate);
+            scheduler.executeMonthlyRegularRemittance();
+        }
+    }
+
+    private Account saveAccount(BigDecimal balance) {
+        return accountRepository.save(Account.of(
+                null, "encoded-password", "테스트 계좌",
+                balance, AccountType.DEPOSIT, AccountState.ACTIVE, 1L
+        ));
+    }
+
+    private MonthlyRegularRemittance saveMonthlyRemittance(Account account, LocalDate batchDate) {
+        return monthlyRegularRemittanceRepository.save(MonthlyRegularRemittance.of(
+                account,
+                recipient,
+                CurrencyCode.KRW,
+                CurrencyCode.USD,
+                SEND_AMOUNT_USD,
+                batchDate.getDayOfMonth(),
+                batchDate.minusMonths(1)
+        ));
+    }
+
+    private BigDecimal balanceOf(Account account) {
+        return accountRepository.findById(account.getId()).orElseThrow().getBalance();
+    }
+
+    private RegRemStatus statusOf(MonthlyRegularRemittance remittance) {
+        return monthlyRegularRemittanceRepository.findById(remittance.getRegRemId()).orElseThrow().getRegRemStatus();
+    }
+
+    private Recipient createRecipient() {
+        try {
+            Constructor<Recipient> constructor = Recipient.class.getDeclaredConstructor();
+            constructor.setAccessible(true);
+            Recipient newRecipient = constructor.newInstance();
+
+            ReflectionTestUtils.setField(newRecipient, "name", "John Doe");
+            ReflectionTestUtils.setField(newRecipient, "phoneNo", "310-555-1234");
+            ReflectionTestUtils.setField(newRecipient, "phoneCc", "+1");
+            ReflectionTestUtils.setField(newRecipient, "bankName", "Test Bank");
+            ReflectionTestUtils.setField(newRecipient, "bankCode", "CHASUS33XXX");
+            ReflectionTestUtils.setField(newRecipient, "accountNo", UUID.randomUUID().toString().substring(0, 12));
+            ReflectionTestUtils.setField(newRecipient, "country", "USA");
+            ReflectionTestUtils.setField(newRecipient, "currencyCode", CurrencyCode.USD);
+
+            return newRecipient;
+        } catch (Exception e) {
+            throw new IllegalStateException("테스트용 수취인 생성에 실패했습니다.", e);
+        }
+    }
+}
