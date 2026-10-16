@@ -136,7 +136,7 @@ public class RegularRemittanceScheduler {
                 return;
             }
 
-            ExecuteRemittanceCommand remittanceCommand = ExecuteRemittanceCommand.of(remittance);
+            ExecuteRemittanceCommand remittanceCommand = ExecuteRemittanceCommand.of(remittance, today);
             try {
                 remittanceProcessorService.executeScheduled(remittanceCommand);
                 // 연기된 작업 수행 후 ACTIVE로 수정
