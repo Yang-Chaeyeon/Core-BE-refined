@@ -71,6 +71,7 @@ public enum ErrorBaseCode implements ErrorCode {
     CONFLICT(HttpStatus.CONFLICT, 409, "이미 존재하는 리소스입니다."),
     DB_CONFLICT(HttpStatus.CONFLICT, 409, "DB 관련 충돌 문제입니다."),
     DUPLICATE_REMITTANCE(HttpStatus.CONFLICT, 40911, "동일한 내용의 자동이체가 이미 등록되어 있습니다."),
+    REGULAR_REMITTANCE_ALREADY_EXECUTED(HttpStatus.CONFLICT, 40912, "오늘 이미 실행된 정기송금입니다."),
     ACCOUNT_LOCK_TIMEOUT(HttpStatus.LOCKED, 42301, "계좌 처리 대기 시간이 초과되었습니다."),
     ACCOUNT_LOCK_INTERRUPTED(HttpStatus.LOCKED, 42302, "계좌 잠금 처리 중 오류가 발생했습니다."),
 
