@@ -28,7 +28,7 @@ import org.creditto.core_banking.global.common.CurrencyCode;
 import org.creditto.core_banking.global.response.error.ErrorBaseCode;
 import org.creditto.core_banking.global.response.exception.CustomBaseException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.Optional;
@@ -53,6 +53,7 @@ public class RemittanceProcessorService {
     private final TransactionService transactionService;
     private final RemittanceFeeService remittanceFeeService;
     private final AccountLockService accountLockService;
+    private final TransactionTemplate transactionTemplate;
 
     /**
      * 전달된 Command를 기반으로 해외송금의 모든 단계를 실행합니다.
@@ -67,9 +68,15 @@ public class RemittanceProcessorService {
      * @throws CustomBaseException 잔액이 부족하거나 지원하지 않는 통화인 경우 발생
      * @throws IllegalArgumentException 관련 엔티티를 찾을 수 없는 경우 발생
      */
-    @Transactional
     public OverseasRemittanceResponseDto execute(final ExecuteRemittanceCommand command) {
+        // 계좌 락 → 트랜잭션 시작 → 커밋 → 계좌 락 해제 순서를 보장하기 위해 락 안에서 트랜잭션을 시작
+        return accountLockService.executeWithLock(
+                command.accountId(),
+                () -> transactionTemplate.execute(status -> executeInTransaction(command))
+        );
+    }
 
+    private OverseasRemittanceResponseDto executeInTransaction(final ExecuteRemittanceCommand command) {
         Account account = accountRepository.findById(command.accountId())
                 .orElseThrow(() -> new CustomBaseException(NOT_FOUND_ACCOUNT));
 
@@ -108,38 +115,36 @@ public class RemittanceProcessorService {
         Exchange savedExchange = exchangeRepository.findById(exchangeId)
                 .orElseThrow(() -> new CustomBaseException(NOT_FOUND_EXCHANGE_RECORD));
 
-        return accountLockService.executeWithLock(command.accountId(), () -> {
-            Account lockedAccount = accountRepository.findByIdForUpdate(command.accountId())
-                    .orElseThrow(() -> new CustomBaseException(NOT_FOUND_ACCOUNT));
+        Account lockedAccount = accountRepository.findByIdForUpdate(command.accountId())
+                .orElseThrow(() -> new CustomBaseException(NOT_FOUND_ACCOUNT));
 
-            if (!lockedAccount.checkSufficientBalance(totalDeductionMoney)) {
-                transactionService.recordFailure(lockedAccount, actualSendAmount, TxnType.WITHDRAWAL, null);
-                throw new CustomBaseException(ErrorBaseCode.INSUFFICIENT_FUNDS);
-            }
+        if (!lockedAccount.checkSufficientBalance(totalDeductionMoney)) {
+            transactionService.recordFailure(lockedAccount, actualSendAmount, TxnType.WITHDRAWAL, null);
+            throw new CustomBaseException(ErrorBaseCode.INSUFFICIENT_FUNDS);
+        }
 
-            OverseasRemittance overseasRemittance = OverseasRemittance.of(
-                    recipient,
-                    lockedAccount,
-                    regularRemittance,
-                    savedExchange,
-                    feeRecord,
-                    actualSendAmount,
-                    command
-            );
-            remittanceRepository.save(overseasRemittance);
+        OverseasRemittance overseasRemittance = OverseasRemittance.of(
+                recipient,
+                lockedAccount,
+                regularRemittance,
+                savedExchange,
+                feeRecord,
+                actualSendAmount,
+                command
+        );
+        remittanceRepository.save(overseasRemittance);
 
-            if (totalFee.compareTo(BigDecimal.ZERO) > 0) {
-                lockedAccount.withdraw(totalFeeMoney);
-                transactionService.saveTransaction(lockedAccount, totalFee, TxnType.FEE, overseasRemittance.getRemittanceId(), TxnResult.SUCCESS);
-            }
+        if (totalFee.compareTo(BigDecimal.ZERO) > 0) {
+            lockedAccount.withdraw(totalFeeMoney);
+            transactionService.saveTransaction(lockedAccount, totalFee, TxnType.FEE, overseasRemittance.getRemittanceId(), TxnResult.SUCCESS);
+        }
 
-            lockedAccount.withdraw(sendAmountMoney);
-            transactionService.saveTransaction(lockedAccount, actualSendAmount, TxnType.WITHDRAWAL, overseasRemittance.getRemittanceId(), TxnResult.SUCCESS);
+        lockedAccount.withdraw(sendAmountMoney);
+        transactionService.saveTransaction(lockedAccount, actualSendAmount, TxnType.WITHDRAWAL, overseasRemittance.getRemittanceId(), TxnResult.SUCCESS);
 
-            accountRepository.save(lockedAccount);
+        accountRepository.save(lockedAccount);
 
-            return OverseasRemittanceResponseDto.from(overseasRemittance);
-        });
+        return OverseasRemittanceResponseDto.from(overseasRemittance);
     }
 
     private ExchangeRes exchange(Long userId, ExecuteRemittanceCommand command) {

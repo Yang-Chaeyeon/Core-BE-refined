@@ -9,13 +9,13 @@ import org.creditto.core_banking.domain.regularremittance.entity.RegRemStatus;
 import org.creditto.core_banking.domain.regularremittance.entity.RegularRemittance;
 import org.creditto.core_banking.domain.regularremittance.entity.WeeklyRegularRemittance;
 import org.creditto.core_banking.domain.regularremittance.repository.MonthlyRegularRemittanceRepository;
+import org.creditto.core_banking.domain.regularremittance.repository.RegularRemittanceRepository;
 import org.creditto.core_banking.domain.regularremittance.repository.WeeklyRegularRemittanceRepository;
 import org.creditto.core_banking.global.response.exception.CustomBaseException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
@@ -32,11 +32,12 @@ public class RegularRemittanceScheduler {
     private final RemittanceProcessorService remittanceProcessorService;
     private final MonthlyRegularRemittanceRepository monthlyRegularRemittanceRepository;
     private final WeeklyRegularRemittanceRepository weeklyRegularRemittanceRepository;
+    private final RegularRemittanceRepository regularRemittanceRepository;
 
     private static final int SIZE = 1000;
     private static final ZoneId ZONE_ID = ZoneId.of("Asia/Seoul");
 
-    @Transactional
+    // 배치 전체를 하나의 트랜잭션으로 묶지 않음: 정기송금 1건마다 RemittanceProcessorService.execute()가 트랜잭션을 열고 커밋
     @Scheduled(cron = "${scheduler.remittance.monthly-cron}")
     public void executeMonthlyRegularRemittance() {
         LocalDate now = LocalDate.now(ZONE_ID);
@@ -93,7 +94,6 @@ public class RegularRemittanceScheduler {
         );
     }
 
-    @Transactional
     @Scheduled(cron = "${scheduler.remittance.weekly-cron}")
     public void executeWeeklyRegularRemittance() {
         LocalDate now = LocalDate.now(ZONE_ID);
@@ -135,10 +135,12 @@ public class RegularRemittanceScheduler {
                 // 연기된 작업 수행 후 ACTIVE로 수정
                 if (remittance.getRegRemStatus().equals(RegRemStatus.DELAYED)) {
                     remittance.updateRegRemStatus(RegRemStatus.ACTIVE);
+                    regularRemittanceRepository.save(remittance);
                 }
             } catch (CustomBaseException e) {
                 log.error("[RegularRemittanceScheduler] 정기 송금 실행에 실패하였습니다. remittanceId={}, error={}", remittance.getRegRemId(), e.getMessage());
                 remittance.updateRegRemStatus(RegRemStatus.DELAYED);
+                regularRemittanceRepository.save(remittance);
             }
         });
     }

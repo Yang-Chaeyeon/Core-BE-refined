@@ -8,6 +8,7 @@ import org.creditto.core_banking.domain.regularremittance.entity.MonthlyRegularR
 import org.creditto.core_banking.domain.regularremittance.entity.RegRemStatus;
 import org.creditto.core_banking.domain.regularremittance.entity.WeeklyRegularRemittance;
 import org.creditto.core_banking.domain.regularremittance.repository.MonthlyRegularRemittanceRepository;
+import org.creditto.core_banking.domain.regularremittance.repository.RegularRemittanceRepository;
 import org.creditto.core_banking.domain.regularremittance.repository.WeeklyRegularRemittanceRepository;
 import org.creditto.core_banking.global.common.CurrencyCode;
 import org.junit.jupiter.api.BeforeEach;
@@ -57,6 +58,8 @@ class RegularRemittanceSchedulerTest {
     private MonthlyRegularRemittanceRepository monthlyRegularRemittanceRepository;
     @Mock
     private WeeklyRegularRemittanceRepository weeklyRegularRemittanceRepository;
+    @Mock
+    private RegularRemittanceRepository regularRemittanceRepository;
 
     @InjectMocks
     private RegularRemittanceScheduler scheduler;
