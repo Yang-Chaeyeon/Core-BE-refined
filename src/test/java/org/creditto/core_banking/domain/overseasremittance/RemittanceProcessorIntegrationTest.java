@@ -87,10 +87,16 @@ class RemittanceProcessorIntegrationTest extends IntegrationTestSupport {
                         .build()
         ));
 
-        // 수수료 정책
-        flatServiceFeeRepository.save(FlatServiceFee.of(null, new BigDecimal("999999999999"), new BigDecimal("5000")));
-        pctServiceFeeRepository.save(PctServiceFee.of(null, BigDecimal.ZERO, false));
-        networkFeeRepository.save(NetworkFee.of(null, CurrencyCode.USD, BigDecimal.ONE));
+        // 수수료 정책은 테스트 간에 공유되므로 없을 때만 저장
+        if (flatServiceFeeRepository.count() == 0) {
+            flatServiceFeeRepository.save(FlatServiceFee.of(null, new BigDecimal("999999999999"), new BigDecimal("5000")));
+        }
+        if (pctServiceFeeRepository.count() == 0) {
+            pctServiceFeeRepository.save(PctServiceFee.of(null, BigDecimal.ZERO, false));
+        }
+        if (networkFeeRepository.findByCurrencyCode(CurrencyCode.USD).isEmpty()) {
+            networkFeeRepository.save(NetworkFee.of(null, CurrencyCode.USD, BigDecimal.ONE));
+        }
 
         account = accountRepository.save(Account.of(
                 null, "encoded-password", "테스트 계좌",
