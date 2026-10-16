@@ -9,13 +9,14 @@ import org.creditto.core_banking.domain.regularremittance.entity.RegRemStatus;
 import org.creditto.core_banking.domain.regularremittance.entity.RegularRemittance;
 import org.creditto.core_banking.domain.regularremittance.entity.WeeklyRegularRemittance;
 import org.creditto.core_banking.domain.regularremittance.repository.MonthlyRegularRemittanceRepository;
+import org.creditto.core_banking.domain.regularremittance.repository.RegularRemittanceRepository;
 import org.creditto.core_banking.domain.regularremittance.repository.WeeklyRegularRemittanceRepository;
+import org.creditto.core_banking.global.response.error.ErrorBaseCode;
 import org.creditto.core_banking.global.response.exception.CustomBaseException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
@@ -32,11 +33,12 @@ public class RegularRemittanceScheduler {
     private final RemittanceProcessorService remittanceProcessorService;
     private final MonthlyRegularRemittanceRepository monthlyRegularRemittanceRepository;
     private final WeeklyRegularRemittanceRepository weeklyRegularRemittanceRepository;
+    private final RegularRemittanceRepository regularRemittanceRepository;
 
     private static final int SIZE = 1000;
     private static final ZoneId ZONE_ID = ZoneId.of("Asia/Seoul");
 
-    @Transactional
+    // 배치 전체를 하나의 트랜잭션으로 묶지 않음: 정기송금 1건마다 RemittanceProcessorService.execute()가 트랜잭션을 열고 커밋
     @Scheduled(cron = "${scheduler.remittance.monthly-cron}")
     public void executeMonthlyRegularRemittance() {
         LocalDate now = LocalDate.now(ZONE_ID);
@@ -82,7 +84,7 @@ public class RegularRemittanceScheduler {
                             PageRequest.of(page, SIZE)
                     );
 
-            executeRemittanceForRegRemList(slice.getContent());
+            executeRemittanceForRegRemList(slice.getContent(), now);
 
             total += slice.getNumberOfElements();
             page++;
@@ -93,7 +95,6 @@ public class RegularRemittanceScheduler {
         );
     }
 
-    @Transactional
     @Scheduled(cron = "${scheduler.remittance.weekly-cron}")
     public void executeWeeklyRegularRemittance() {
         LocalDate now = LocalDate.now(ZONE_ID);
@@ -116,7 +117,7 @@ public class RegularRemittanceScheduler {
                             PageRequest.of(page, SIZE)
                     );
 
-            executeRemittanceForRegRemList(slice.getContent());
+            executeRemittanceForRegRemList(slice.getContent(), now);
 
             total += slice.getNumberOfElements();
             page++;
@@ -127,19 +128,35 @@ public class RegularRemittanceScheduler {
         );
     }
 
-    private void executeRemittanceForRegRemList(List<? extends RegularRemittance> remittances) {
+    private void executeRemittanceForRegRemList(List<? extends RegularRemittance> remittances, LocalDate today) {
         remittances.forEach(remittance -> {
-            ExecuteRemittanceCommand remittanceCommand = ExecuteRemittanceCommand.of(remittance);
+            // 같은 날 이미 실행된 정기송금은 건너뜀 (배치 재실행 시 중복 출금 방지)
+            if (remittance.isExecutedOn(today)) {
+                log.info("[RegularRemittanceScheduler] 오늘 이미 실행된 정기 송금입니다. remittanceId={}", remittance.getRegRemId());
+                return;
+            }
+
+            ExecuteRemittanceCommand remittanceCommand = ExecuteRemittanceCommand.of(remittance, today);
             try {
-                remittanceProcessorService.execute(remittanceCommand);
+                remittanceProcessorService.executeScheduled(remittanceCommand);
                 // 연기된 작업 수행 후 ACTIVE로 수정
                 if (remittance.getRegRemStatus().equals(RegRemStatus.DELAYED)) {
-                    remittance.updateRegRemStatus(RegRemStatus.ACTIVE);
+                    updateStatus(remittance, RegRemStatus.ACTIVE);
                 }
             } catch (CustomBaseException e) {
+                // 동시에 실행된 다른 배치가 먼저 처리한 경우: 실패가 아니므로 상태를 바꾸지 않음
+                if (e.getErrorCode() == ErrorBaseCode.REGULAR_REMITTANCE_ALREADY_EXECUTED) {
+                    log.info("[RegularRemittanceScheduler] 다른 실행에서 이미 처리된 정기 송금입니다. remittanceId={}", remittance.getRegRemId());
+                    return;
+                }
                 log.error("[RegularRemittanceScheduler] 정기 송금 실행에 실패하였습니다. remittanceId={}, error={}", remittance.getRegRemId(), e.getMessage());
-                remittance.updateRegRemStatus(RegRemStatus.DELAYED);
+                updateStatus(remittance, RegRemStatus.DELAYED);
             }
         });
+    }
+
+    private void updateStatus(RegularRemittance remittance, RegRemStatus status) {
+        remittance.updateRegRemStatus(status);
+        regularRemittanceRepository.updateRegRemStatus(remittance.getRegRemId(), status);
     }
 }

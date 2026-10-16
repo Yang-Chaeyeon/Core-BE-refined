@@ -28,7 +28,7 @@ import org.creditto.core_banking.global.common.CurrencyCode;
 import org.creditto.core_banking.global.response.error.ErrorBaseCode;
 import org.creditto.core_banking.global.response.exception.CustomBaseException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.Optional;
@@ -53,6 +53,7 @@ public class RemittanceProcessorService {
     private final TransactionService transactionService;
     private final RemittanceFeeService remittanceFeeService;
     private final AccountLockService accountLockService;
+    private final TransactionTemplate transactionTemplate;
 
     /**
      * 전달된 Command를 기반으로 해외송금의 모든 단계를 실행합니다.
@@ -67,9 +68,32 @@ public class RemittanceProcessorService {
      * @throws CustomBaseException 잔액이 부족하거나 지원하지 않는 통화인 경우 발생
      * @throws IllegalArgumentException 관련 엔티티를 찾을 수 없는 경우 발생
      */
-    @Transactional
     public OverseasRemittanceResponseDto execute(final ExecuteRemittanceCommand command) {
+        return executeWithAccountLock(command, false);
+    }
 
+    /**
+     * 정기송금 배치에서 송금을 실행합니다.
+     * {@link #execute}와 같지만, 같은 날 이미 실행된 정기송금이면 출금하지 않고
+     * {@link ErrorBaseCode#REGULAR_REMITTANCE_ALREADY_EXECUTED} 예외를 던지며,
+     * 송금에 성공하면 같은 트랜잭션에서 정기송금의 마지막 실행일을 기록합니다.
+     *
+     * @param command 송금 실행에 필요한 모든 데이터가 포함된 Command 객체 (regRemId 필수)
+     * @return 송금 처리 결과를 담은 응답 DTO
+     */
+    public OverseasRemittanceResponseDto executeScheduled(final ExecuteRemittanceCommand command) {
+        return executeWithAccountLock(command, true);
+    }
+
+    private OverseasRemittanceResponseDto executeWithAccountLock(final ExecuteRemittanceCommand command, final boolean scheduled) {
+        // 계좌 락 → 트랜잭션 시작 → 커밋 → 계좌 락 해제 순서를 보장하기 위해 락 안에서 트랜잭션을 시작
+        return accountLockService.executeWithLock(
+                command.accountId(),
+                () -> transactionTemplate.execute(status -> executeInTransaction(command, scheduled))
+        );
+    }
+
+    private OverseasRemittanceResponseDto executeInTransaction(final ExecuteRemittanceCommand command, final boolean scheduled) {
         Account account = accountRepository.findById(command.accountId())
                 .orElseThrow(() -> new CustomBaseException(NOT_FOUND_ACCOUNT));
 
@@ -77,13 +101,6 @@ public class RemittanceProcessorService {
                 .orElseThrow(() -> new CustomBaseException(NOT_FOUND_RECIPIENT));
 
         Long userId = account.getUserId();
-
-
-        // 정기 송금 정보 조회 (regRemId가 있을 경우)
-        RegularRemittance regularRemittance = Optional.ofNullable(command.regRemId())
-                .map(id -> regularRemittanceRepository.findById(id)
-                        .orElseThrow(() -> new CustomBaseException(NOT_FOUND_REGULAR_REMITTANCE)))
-                .orElse(null);
 
         // 1. ExchangeService를 통해 환전 처리 및 결과(DTO) 수신
         ExchangeRes exchangeRes = exchange(userId, command);
@@ -108,38 +125,63 @@ public class RemittanceProcessorService {
         Exchange savedExchange = exchangeRepository.findById(exchangeId)
                 .orElseThrow(() -> new CustomBaseException(NOT_FOUND_EXCHANGE_RECORD));
 
-        return accountLockService.executeWithLock(command.accountId(), () -> {
-            Account lockedAccount = accountRepository.findByIdForUpdate(command.accountId())
-                    .orElseThrow(() -> new CustomBaseException(NOT_FOUND_ACCOUNT));
+        Account lockedAccount = accountRepository.findByIdForUpdate(command.accountId())
+                .orElseThrow(() -> new CustomBaseException(NOT_FOUND_ACCOUNT));
 
-            if (!lockedAccount.checkSufficientBalance(totalDeductionMoney)) {
-                transactionService.saveTransaction(lockedAccount, actualSendAmount, TxnType.WITHDRAWAL, null, TxnResult.FAILURE);
-                throw new CustomBaseException(ErrorBaseCode.INSUFFICIENT_FUNDS);
+        // 정기 송금 정보 조회 (regRemId가 있을 경우)
+        // 배치 실행은 계좌 잠금 이후 정기송금 행도 잠근 상태로 처음 조회해, 동시에 실행돼도 최신 실행일을 기준으로 판단
+        RegularRemittance regularRemittance = findRegularRemittance(command.regRemId(), scheduled);
+
+        if (scheduled && regularRemittance.isExecutedOn(command.startDate())) {
+            throw new CustomBaseException(ErrorBaseCode.REGULAR_REMITTANCE_ALREADY_EXECUTED);
+        }
+
+        if (!lockedAccount.checkSufficientBalance(totalDeductionMoney)) {
+            transactionService.recordFailure(lockedAccount, actualSendAmount, TxnType.WITHDRAWAL, null);
+            throw new CustomBaseException(ErrorBaseCode.INSUFFICIENT_FUNDS);
+        }
+
+        OverseasRemittance overseasRemittance = OverseasRemittance.of(
+                recipient,
+                lockedAccount,
+                regularRemittance,
+                savedExchange,
+                feeRecord,
+                actualSendAmount,
+                command
+        );
+        remittanceRepository.save(overseasRemittance);
+
+        if (totalFee.compareTo(BigDecimal.ZERO) > 0) {
+            lockedAccount.withdraw(totalFeeMoney);
+            transactionService.saveTransaction(lockedAccount, totalFee, TxnType.FEE, overseasRemittance.getRemittanceId(), TxnResult.SUCCESS);
+        }
+
+        lockedAccount.withdraw(sendAmountMoney);
+        transactionService.saveTransaction(lockedAccount, actualSendAmount, TxnType.WITHDRAWAL, overseasRemittance.getRemittanceId(), TxnResult.SUCCESS);
+
+        accountRepository.save(lockedAccount);
+
+        if (scheduled) {
+            regularRemittance.markExecuted(command.startDate());
+        }
+
+        return OverseasRemittanceResponseDto.from(overseasRemittance);
+    }
+
+    private RegularRemittance findRegularRemittance(Long regRemId, boolean scheduled) {
+        if (regRemId == null) {
+            if (scheduled) {
+                throw new CustomBaseException(NOT_FOUND_REGULAR_REMITTANCE);
             }
+            return null;
+        }
 
-            OverseasRemittance overseasRemittance = OverseasRemittance.of(
-                    recipient,
-                    lockedAccount,
-                    regularRemittance,
-                    savedExchange,
-                    feeRecord,
-                    actualSendAmount,
-                    command
-            );
-            remittanceRepository.save(overseasRemittance);
+        Optional<RegularRemittance> regularRemittance = scheduled
+                ? regularRemittanceRepository.findByIdForUpdate(regRemId)
+                : regularRemittanceRepository.findById(regRemId);
 
-            if (totalFee.compareTo(BigDecimal.ZERO) > 0) {
-                lockedAccount.withdraw(totalFeeMoney);
-                transactionService.saveTransaction(lockedAccount, totalFee, TxnType.FEE, overseasRemittance.getRemittanceId(), TxnResult.SUCCESS);
-            }
-
-            lockedAccount.withdraw(sendAmountMoney);
-            transactionService.saveTransaction(lockedAccount, actualSendAmount, TxnType.WITHDRAWAL, overseasRemittance.getRemittanceId(), TxnResult.SUCCESS);
-
-            accountRepository.save(lockedAccount);
-
-            return OverseasRemittanceResponseDto.from(overseasRemittance);
-        });
+        return regularRemittance.orElseThrow(() -> new CustomBaseException(NOT_FOUND_REGULAR_REMITTANCE));
     }
 
     private ExchangeRes exchange(Long userId, ExecuteRemittanceCommand command) {

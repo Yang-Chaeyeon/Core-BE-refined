@@ -50,6 +50,9 @@ public abstract class RegularRemittance {
     // 송금 시작일
     private LocalDate startedAt;
 
+    // 마지막으로 정기송금 배치가 실행된 날짜 (같은 날 중복 실행 방지)
+    private LocalDate lastExecutedDate;
+
     // 엔티티 생성 시각 자동 저장
     @CreatedDate
     @Column(name = "created_at", nullable = false, updatable = false, columnDefinition = "DATETIME(6)")
@@ -64,6 +67,14 @@ public abstract class RegularRemittance {
 
     public void updateRegRemStatus(RegRemStatus regRemStatus) {
         this.regRemStatus = regRemStatus;
+    }
+
+    public boolean isExecutedOn(LocalDate date) {
+        return date != null && date.equals(this.lastExecutedDate);
+    }
+
+    public void markExecuted(LocalDate date) {
+        this.lastExecutedDate = date;
     }
 
     public void updateDetails(

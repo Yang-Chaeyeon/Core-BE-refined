@@ -8,6 +8,7 @@ import org.creditto.core_banking.domain.regularremittance.entity.MonthlyRegularR
 import org.creditto.core_banking.domain.regularremittance.entity.RegRemStatus;
 import org.creditto.core_banking.domain.regularremittance.entity.WeeklyRegularRemittance;
 import org.creditto.core_banking.domain.regularremittance.repository.MonthlyRegularRemittanceRepository;
+import org.creditto.core_banking.domain.regularremittance.repository.RegularRemittanceRepository;
 import org.creditto.core_banking.domain.regularremittance.repository.WeeklyRegularRemittanceRepository;
 import org.creditto.core_banking.global.common.CurrencyCode;
 import org.junit.jupiter.api.BeforeEach;
@@ -57,6 +58,8 @@ class RegularRemittanceSchedulerTest {
     private MonthlyRegularRemittanceRepository monthlyRegularRemittanceRepository;
     @Mock
     private WeeklyRegularRemittanceRepository weeklyRegularRemittanceRepository;
+    @Mock
+    private RegularRemittanceRepository regularRemittanceRepository;
 
     @InjectMocks
     private RegularRemittanceScheduler scheduler;
@@ -108,7 +111,7 @@ class RegularRemittanceSchedulerTest {
                         eq(Set.of(RegRemStatus.ACTIVE, RegRemStatus.DELAYED)),
                         any(PageRequest.class)
                 );
-        verify(remittanceProcessorService, times(3)).execute(any(ExecuteRemittanceCommand.class));
+        verify(remittanceProcessorService, times(3)).executeScheduled(any(ExecuteRemittanceCommand.class));
         assertEquals(RegRemStatus.ACTIVE, delayedRemittance.getRegRemStatus());
     }
 
@@ -132,7 +135,7 @@ class RegularRemittanceSchedulerTest {
 
         verify(monthlyRegularRemittanceRepository)
                 .bulkUpdateRegRemStatusByScheduledDates(eq(List.of(scheduledDate)), eq(RegRemStatus.DELAYED), eq(RegRemStatus.ACTIVE));
-        verify(remittanceProcessorService, never()).execute(any(ExecuteRemittanceCommand.class));
+        verify(remittanceProcessorService, never()).executeScheduled(any(ExecuteRemittanceCommand.class));
     }
 
     @Test
@@ -191,7 +194,7 @@ class RegularRemittanceSchedulerTest {
             scheduler.executeMonthlyRegularRemittance();
         }
 
-        verify(remittanceProcessorService, times(remittances.size())).execute(any(ExecuteRemittanceCommand.class));
+        verify(remittanceProcessorService, times(remittances.size())).executeScheduled(any(ExecuteRemittanceCommand.class));
     }
 
     @Test
@@ -222,7 +225,7 @@ class RegularRemittanceSchedulerTest {
             scheduler.executeWeeklyRegularRemittance();
         }
 
-        verify(remittanceProcessorService, times(page0Content.size() + page1Content.size())).execute(any(ExecuteRemittanceCommand.class));
+        verify(remittanceProcessorService, times(page0Content.size() + page1Content.size())).executeScheduled(any(ExecuteRemittanceCommand.class));
     }
 
     @Test
@@ -250,7 +253,7 @@ class RegularRemittanceSchedulerTest {
             scheduler.executeWeeklyRegularRemittance();
         }
 
-        verify(remittanceProcessorService, times(remittances.size())).execute(any(ExecuteRemittanceCommand.class));
+        verify(remittanceProcessorService, times(remittances.size())).executeScheduled(any(ExecuteRemittanceCommand.class));
     }
 
     private MonthlyRegularRemittance createMonthlyRemittance(int scheduledDate, RegRemStatus status) {

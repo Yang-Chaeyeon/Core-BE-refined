@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collection;
 
@@ -27,6 +28,7 @@ public interface MonthlyRegularRemittanceRepository extends JpaRepository<Monthl
             Pageable pageable
     );
 
+    @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("UPDATE MonthlyRegularRemittance m " +
             "SET m.regRemStatus = :toStatus " +
