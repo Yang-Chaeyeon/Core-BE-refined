@@ -113,7 +113,7 @@ public class RemittanceProcessorService {
                     .orElseThrow(() -> new CustomBaseException(NOT_FOUND_ACCOUNT));
 
             if (!lockedAccount.checkSufficientBalance(totalDeductionMoney)) {
-                transactionService.saveTransaction(lockedAccount, actualSendAmount, TxnType.WITHDRAWAL, null, TxnResult.FAILURE);
+                transactionService.recordFailure(lockedAccount, actualSendAmount, TxnType.WITHDRAWAL, null);
                 throw new CustomBaseException(ErrorBaseCode.INSUFFICIENT_FUNDS);
             }
 

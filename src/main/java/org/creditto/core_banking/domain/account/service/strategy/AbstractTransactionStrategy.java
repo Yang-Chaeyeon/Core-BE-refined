@@ -32,7 +32,7 @@ public abstract class AbstractTransactionStrategy implements TransactionStrategy
     }
 
     private void saveFailedTransaction(Account account, BigDecimal amount, Long typeId) {
-        transactionService.saveTransaction(account, amount, getTxnType(), typeId, TxnResult.FAILURE);
+        transactionService.recordFailure(account, amount, getTxnType(), typeId);
     }
 
     /**
