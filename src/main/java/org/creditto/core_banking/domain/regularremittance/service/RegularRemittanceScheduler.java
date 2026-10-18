@@ -38,7 +38,7 @@ public class RegularRemittanceScheduler {
     private static final int SIZE = 1000;
     private static final ZoneId ZONE_ID = ZoneId.of("Asia/Seoul");
 
-    // 배치 전체를 하나의 트랜잭션으로 묶지 않음: 정기송금 1건마다 RemittanceProcessorService.execute()가 트랜잭션을 열고 커밋
+    // 배치 전체를 하나의 트랜잭션으로 묶지 않음: 정기송금 1건마다 RemittanceProcessorService.executeScheduled()가 트랜잭션을 열고 커밋
     @Scheduled(cron = "${scheduler.remittance.monthly-cron}")
     public void executeMonthlyRegularRemittance() {
         LocalDate now = LocalDate.now(ZONE_ID);
@@ -160,8 +160,14 @@ public class RegularRemittanceScheduler {
         });
     }
 
+    // 상태 저장 실패가 배치 전체를 멈추지 않도록, 실패해도 로그만 남기고 다음 건으로 진행
     private void updateStatus(RegularRemittance remittance, RegRemStatus status) {
-        remittance.updateRegRemStatus(status);
-        regularRemittanceRepository.updateRegRemStatus(remittance.getRegRemId(), status);
+        try {
+            regularRemittanceRepository.updateRegRemStatus(remittance.getRegRemId(), status);
+            remittance.updateRegRemStatus(status);
+        } catch (RuntimeException e) {
+            log.error("[RegularRemittanceScheduler] 정기 송금 상태 저장에 실패했습니다. remittanceId={}, status={}",
+                    remittance.getRegRemId(), status, e);
+        }
     }
 }
