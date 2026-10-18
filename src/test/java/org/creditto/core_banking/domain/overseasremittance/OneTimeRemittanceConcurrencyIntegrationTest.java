@@ -7,6 +7,7 @@ import org.creditto.core_banking.domain.account.repository.AccountRepository;
 import org.creditto.core_banking.domain.exchange.dto.ExchangeRateRes;
 import org.creditto.core_banking.domain.overseasremittance.dto.OverseasRemittanceRequestDto;
 import org.creditto.core_banking.domain.overseasremittance.service.OneTimeRemittanceService;
+import org.creditto.core_banking.domain.recipient.service.RecipientFactory;
 import org.creditto.core_banking.domain.remittancefee.entity.FlatServiceFee;
 import org.creditto.core_banking.domain.remittancefee.entity.NetworkFee;
 import org.creditto.core_banking.domain.remittancefee.entity.PctServiceFee;
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -39,7 +41,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willAnswer;
 
 /**
  * 실제 MySQL · Redis에서 같은 계좌로 일회성 해외송금 2건이 동시에 들어올 때 잔액 정합성을 확인합니다.
@@ -64,6 +68,9 @@ class OneTimeRemittanceConcurrencyIntegrationTest extends IntegrationTestSupport
 
     @MockitoBean
     private ExchangeRateProvider exchangeRateProvider;
+
+    @MockitoSpyBean
+    private RecipientFactory recipientFactory;
 
     @Autowired
     private OneTimeRemittanceService oneTimeRemittanceService;
@@ -110,13 +117,28 @@ class OneTimeRemittanceConcurrencyIntegrationTest extends IntegrationTestSupport
     @Test
     @DisplayName("같은 계좌로 송금 2건이 동시에 실행돼도, 잔액은 성공한 거래내역 금액만큼 줄어든다")
     void concurrentRemittances_keepBalanceConsistent() throws Exception {
-        // 첫 번째 송금의 환율 조회만 2초 지연시켜, 두 번째 송금이 그 사이에 계좌를 읽게 만든다
+        // 두 번째 송금이 계좌를 읽은 뒤(수취인 조회 시점) 신호를 보냄
+        // processRemittance는 계좌 조회 → 비밀번호 검증 → 수취인 조회 → 송금 실행 순서
+        CountDownLatch secondReadAccount = new CountDownLatch(1);
+        AtomicInteger recipientCalls = new AtomicInteger();
+        willAnswer(invocation -> {
+            Object recipient = invocation.callRealMethod();
+            if (recipientCalls.incrementAndGet() == 2) {
+                secondReadAccount.countDown();
+            }
+            return recipient;
+        }).given(recipientFactory).findOrCreate(any());
+
+        // 첫 번째 송금은 계좌 락을 잡은 채 환율 조회에서 멈춰, 두 번째 송금이 계좌를 읽을 때까지 커밋하지 않음
+        // (첫 번째 송금이 두 번째 송금의 완료를 기다리면, 두 번째 송금은 계좌 락을 못 얻어 교착 상태가 되므로 '계좌를 읽은 시점'까지만 기다림)
         CountDownLatch firstInProgress = new CountDownLatch(1);
         AtomicInteger exchangeCalls = new AtomicInteger();
         given(exchangeRateProvider.getExchangeRates()).willAnswer(invocation -> {
             if (exchangeCalls.incrementAndGet() == 1) {
                 firstInProgress.countDown();
-                Thread.sleep(2000);
+                if (!secondReadAccount.await(10, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("두 번째 송금이 계좌를 읽지 못했습니다.");
+                }
             }
             return RATES;
         });
