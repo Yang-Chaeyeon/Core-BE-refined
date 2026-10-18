@@ -3,6 +3,9 @@
 spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # main application.yml과 동일하게 유지 (테스트 실행 시에는 main 설정이 적용되지 않음)
+      connection-init-sql: "SET SESSION innodb_lock_wait_timeout = 3"
 
   jpa:
     hibernate:

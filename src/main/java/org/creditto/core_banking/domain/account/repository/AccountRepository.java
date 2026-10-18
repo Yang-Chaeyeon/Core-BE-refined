@@ -1,7 +1,6 @@
 package org.creditto.core_banking.domain.account.repository;
 
 import jakarta.persistence.LockModeType;
-import jakarta.persistence.QueryHint;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
@@ -10,7 +9,6 @@ import org.creditto.core_banking.domain.account.entity.Account;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
@@ -31,8 +29,8 @@ public interface AccountRepository extends JpaRepository<Account, Long> {
             "FROM Account ac WHERE ac.userId = :userId")
     AccountSummaryRes findAccountSummaryByUserId(@Param("userId") Long userId);
 
+    // 락 대기 시간(3초)은 application.yml의 connection-init-sql로 적용됨
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "3000"))
     @Query("SELECT a FROM Account a WHERE a.id = :id")
     Optional<Account> findByIdForUpdate(@Param("id") Long id);
 }

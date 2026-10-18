@@ -6,6 +6,9 @@ spring:
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
     driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # @QueryHint lock.timeout은 MySQL에서 무시되므로 세션 변수로 락 대기 시간을 제한 (앱 전체 락 대기에 적용됨)
+      connection-init-sql: "SET SESSION innodb_lock_wait_timeout = 3"
   data:
     redis:
       host: ${REDIS_HOST}
