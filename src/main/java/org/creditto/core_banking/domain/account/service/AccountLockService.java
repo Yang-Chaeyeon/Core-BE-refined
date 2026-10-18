@@ -56,9 +56,12 @@ public class AccountLockService {
             Thread.currentThread().interrupt();
             throw new CustomBaseException(ErrorBaseCode.ACCOUNT_LOCK_INTERRUPTED);
         } finally {
-            if (redisLockAcquired && lock.isHeldByCurrentThread()) {
+            // isHeldByCurrentThread()도 Redis 조회라 예외가 날 수 있으므로, 커밋 이후 예외가 호출자에게 전파되지 않게 함께 감쌈
+            if (redisLockAcquired) {
                 try {
-                    lock.unlock();
+                    if (lock.isHeldByCurrentThread()) {
+                        lock.unlock();
+                    }
                 } catch (RuntimeException unlockException) {
                     log.warn("Redis lock 해제 실패. accountId={}, reason={}", accountId, unlockException.getMessage());
                 }

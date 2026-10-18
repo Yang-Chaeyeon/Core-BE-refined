@@ -39,10 +39,10 @@ import static org.mockito.BDDMockito.given;
 /**
  * 실제 MySQL에서 해외송금 1건을 실행했을 때의 동작을 확인합니다.
  *
- * <p>RemittanceProcessorService.execute()는 계좌 행을 FOR UPDATE로 잠근 뒤,
- * TransactionService.saveTransaction()(REQUIRES_NEW)으로 거래내역을 별도 트랜잭션에서 저장합니다.
- * 거래내역 테이블은 account_id 외래키를 가지므로, InnoDB에서는 이 저장이 바깥 트랜잭션의 잠금을
- * 기다리게 되는지 검증합니다.</p>
+ * <p>RemittanceProcessorService.execute()는 계좌 행을 FOR UPDATE로 잠근 뒤 거래내역을 저장합니다.
+ * 거래내역 테이블은 account_id 외래키를 가지므로, 거래내역을 별도 트랜잭션(REQUIRES_NEW)에서 저장하면
+ * InnoDB에서 바깥 트랜잭션의 잠금을 기다리게 됩니다. 같은 트랜잭션에서 저장해 잠금 대기 없이
+ * 끝나는지 검증합니다.</p>
  */
 @DisplayName("[통합] 해외송금 1건 실행")
 class RemittanceProcessorIntegrationTest extends IntegrationTestSupport {

@@ -34,6 +34,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -193,6 +194,44 @@ class RegularRemittanceBatchIntegrationTest extends IntegrationTestSupport {
 
         assertThat(balanceAfterFirstRun).isLessThan(INITIAL_BALANCE);
         assertThat(balanceOf(account)).isEqualByComparingTo(balanceAfterFirstRun);
+    }
+
+    @Test
+    @DisplayName("예상치 못한 예외로 1건이 실패해도 나머지 정기송금은 실행된다")
+    void unexpectedException_doesNotStopBatch() {
+        LocalDate batchDate = LocalDate.of(2026, 10, 16); // 금요일
+
+        List<Account> accounts = List.of(
+                saveAccount(INITIAL_BALANCE),
+                saveAccount(INITIAL_BALANCE),
+                saveAccount(INITIAL_BALANCE)
+        );
+        List<MonthlyRegularRemittance> remittances = accounts.stream()
+                .map(account -> saveMonthlyRemittance(account, batchDate))
+                .toList();
+
+        // 2번째 건의 환율 조회만 실패시켜, 외부 환율 API가 일시적으로 에러를 낸 상황을 만든다
+        AtomicInteger exchangeCalls = new AtomicInteger();
+        given(exchangeRateProvider.getExchangeRates()).willAnswer(invocation -> {
+            if (exchangeCalls.incrementAndGet() == 2) {
+                throw new IllegalStateException("환율 API 일시 오류");
+            }
+            return RATES;
+        });
+
+        assertThatCode(() -> runMonthlyBatch(batchDate)).doesNotThrowAnyException();
+
+        // 어느 건이 2번째로 처리될지는 조회 순서에 따르므로, 건수와 함께 건별로 출금 여부와 상태를 짝지어 확인
+        long withdrawnCount = accounts.stream()
+                .filter(account -> balanceOf(account).compareTo(INITIAL_BALANCE) < 0)
+                .count();
+        assertThat(withdrawnCount).isEqualTo(2);
+
+        for (int i = 0; i < accounts.size(); i++) {
+            boolean withdrawn = balanceOf(accounts.get(i)).compareTo(INITIAL_BALANCE) < 0;
+            RegRemStatus expected = withdrawn ? RegRemStatus.ACTIVE : RegRemStatus.DELAYED;
+            assertThat(statusOf(remittances.get(i))).isEqualTo(expected);
+        }
     }
 
     private void runMonthlyBatch(LocalDate batchDate) {
