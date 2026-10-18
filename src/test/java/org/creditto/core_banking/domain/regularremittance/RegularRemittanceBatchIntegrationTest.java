@@ -221,16 +221,17 @@ class RegularRemittanceBatchIntegrationTest extends IntegrationTestSupport {
 
         assertThatCode(() -> runMonthlyBatch(batchDate)).doesNotThrowAnyException();
 
-        // 어느 건이 2번째로 처리될지는 조회 순서에 따르므로, 건수로 확인
+        // 어느 건이 2번째로 처리될지는 조회 순서에 따르므로, 건수와 함께 건별로 출금 여부와 상태를 짝지어 확인
         long withdrawnCount = accounts.stream()
                 .filter(account -> balanceOf(account).compareTo(INITIAL_BALANCE) < 0)
                 .count();
-        long delayedCount = remittances.stream()
-                .filter(remittance -> statusOf(remittance) == RegRemStatus.DELAYED)
-                .count();
-
         assertThat(withdrawnCount).isEqualTo(2);
-        assertThat(delayedCount).isEqualTo(1);
+
+        for (int i = 0; i < accounts.size(); i++) {
+            boolean withdrawn = balanceOf(accounts.get(i)).compareTo(INITIAL_BALANCE) < 0;
+            RegRemStatus expected = withdrawn ? RegRemStatus.ACTIVE : RegRemStatus.DELAYED;
+            assertThat(statusOf(remittances.get(i))).isEqualTo(expected);
+        }
     }
 
     private void runMonthlyBatch(LocalDate batchDate) {
