@@ -1,5 +1,8 @@
 package org.creditto.core_banking.domain.overseasremittance.service;
 
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
+import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import org.creditto.core_banking.common.vo.Money;
 import org.creditto.core_banking.domain.account.entity.Account;
@@ -54,6 +57,9 @@ public class RemittanceProcessorService {
     private final RemittanceFeeService remittanceFeeService;
     private final AccountLockService accountLockService;
     private final TransactionTemplate transactionTemplate;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     /**
      * 전달된 Command를 기반으로 해외송금의 모든 단계를 실행합니다.
@@ -125,8 +131,10 @@ public class RemittanceProcessorService {
         Exchange savedExchange = exchangeRepository.findById(exchangeId)
                 .orElseThrow(() -> new CustomBaseException(NOT_FOUND_EXCHANGE_RECORD));
 
-        Account lockedAccount = accountRepository.findByIdForUpdate(command.accountId())
-                .orElseThrow(() -> new CustomBaseException(NOT_FOUND_ACCOUNT));
+        // 같은 트랜잭션에서 이미 읽은 계좌는 다시 조회해도 1차 캐시의 (락 이전) 값이 반환되므로,
+        // 락을 걸면서 DB의 최신 잔액으로 다시 읽어 다른 요청의 출금을 덮어쓰지 않게 함
+        entityManager.refresh(account, LockModeType.PESSIMISTIC_WRITE);
+        Account lockedAccount = account;
 
         // 정기 송금 정보 조회 (regRemId가 있을 경우)
         // 배치 실행은 계좌 잠금 이후 정기송금 행도 잠근 상태로 처음 조회해, 동시에 실행돼도 최신 실행일을 기준으로 판단
