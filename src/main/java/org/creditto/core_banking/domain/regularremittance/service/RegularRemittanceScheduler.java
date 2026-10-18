@@ -151,6 +151,11 @@ public class RegularRemittanceScheduler {
                 }
                 log.error("[RegularRemittanceScheduler] 정기 송금 실행에 실패하였습니다. remittanceId={}, error={}", remittance.getRegRemId(), e.getMessage());
                 updateStatus(remittance, RegRemStatus.DELAYED);
+            } catch (RuntimeException e) {
+                // 외부 API 오류, DB 락 대기 초과 등 예상치 못한 예외: 해당 건만 DELAYED 처리하고 다음 건 계속 실행
+                log.error("[RegularRemittanceScheduler] 정기 송금 실행 중 예상치 못한 오류가 발생했습니다. remittanceId={}",
+                        remittance.getRegRemId(), e);
+                updateStatus(remittance, RegRemStatus.DELAYED);
             }
         });
     }
