@@ -1,5 +1,6 @@
 package org.creditto.core_banking.domain.regularremittance;
 
+import org.creditto.core_banking.common.vo.Money;
 import org.creditto.core_banking.domain.account.entity.Account;
 import org.creditto.core_banking.domain.account.entity.AccountState;
 import org.creditto.core_banking.domain.account.entity.AccountType;
@@ -232,6 +233,59 @@ class RegularRemittanceBatchIntegrationTest extends IntegrationTestSupport {
             RegRemStatus expected = withdrawn ? RegRemStatus.ACTIVE : RegRemStatus.DELAYED;
             assertThat(statusOf(remittances.get(i))).isEqualTo(expected);
         }
+    }
+
+    /**
+     * 주말에 예약돼 DELAYED로 미뤄진 월간 정기송금이 다음 평일(월요일) 배치에서 실행되는지 확인합니다.
+     */
+    @Test
+    @DisplayName("주말이라 지연된 정기송금은 다음 평일 배치에서 실행된다")
+    void weekendDelayed_isExecutedOnNextWeekday() {
+        LocalDate saturday = LocalDate.of(2026, 10, 17);
+        LocalDate monday = LocalDate.of(2026, 10, 19);
+
+        Account account = saveAccount(INITIAL_BALANCE);
+        MonthlyRegularRemittance remittance = saveMonthlyRemittance(account, saturday);
+
+        runMonthlyBatch(saturday);
+
+        assertThat(statusOf(remittance)).isEqualTo(RegRemStatus.DELAYED);
+        assertThat(balanceOf(account)).isEqualByComparingTo(INITIAL_BALANCE);
+
+        runMonthlyBatch(monday);
+
+        assertThat(balanceOf(account)).isLessThan(INITIAL_BALANCE);
+        assertThat(statusOf(remittance)).isEqualTo(RegRemStatus.ACTIVE);
+    }
+
+    /**
+     * 잔액 부족으로 실패해 DELAYED가 된 월간 정기송금이 다음 날 배치에서 다시 실행되는지 확인합니다.
+     */
+    @Test
+    @DisplayName("실패로 지연된 정기송금은 다음 날 배치에서 다시 실행된다")
+    void failedDelayed_isRetriedNextDay() {
+        LocalDate tuesday = LocalDate.of(2026, 10, 20);
+        LocalDate wednesday = LocalDate.of(2026, 10, 21);
+
+        Account account = saveAccount(BigDecimal.ZERO);
+        MonthlyRegularRemittance remittance = saveMonthlyRemittance(account, tuesday);
+
+        runMonthlyBatch(tuesday);
+
+        assertThat(statusOf(remittance)).isEqualTo(RegRemStatus.DELAYED);
+
+        deposit(account, INITIAL_BALANCE);
+        runMonthlyBatch(wednesday);
+
+        assertThat(balanceOf(account)).isLessThan(INITIAL_BALANCE);
+        assertThat(statusOf(remittance)).isEqualTo(RegRemStatus.ACTIVE);
+    }
+
+    private void deposit(Account account, BigDecimal amount) {
+        transactionTemplate.executeWithoutResult(status ->
+                accountRepository.findById(account.getId()).orElseThrow()
+                        .deposit(Money.of(amount, CurrencyCode.KRW))
+        );
     }
 
     private void runMonthlyBatch(LocalDate batchDate) {
