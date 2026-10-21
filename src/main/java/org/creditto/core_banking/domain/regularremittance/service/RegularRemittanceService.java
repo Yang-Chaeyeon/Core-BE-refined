@@ -202,7 +202,8 @@ public class RegularRemittanceService {
      */
     @Transactional
     public void updateScheduledRemittance(Long regRemId, Long userId, RegularRemittanceUpdateDto dto) {
-        RegularRemittance remittance = regularRemittanceRepository.findById(regRemId)
+        // 배치(markExecuted)와 동시에 수정되면 오래된 상태·실행일로 덮어써 중복 출금이 날 수 있어 행을 잠근다
+        RegularRemittance remittance = regularRemittanceRepository.findByIdForUpdate(regRemId)
                 .orElseThrow(() -> new CustomBaseException(ErrorBaseCode.NOT_FOUND_REGULAR_REMITTANCE));
         verifyUserOwnership(remittance.getAccount().getUserId(), userId);
 
