@@ -301,6 +301,23 @@ class RegularRemittanceServiceTest {
         assertThrows(CustomBaseException.class, () -> regularRemittanceService.updateScheduledRemittance(testMonthlyRemittance.getRegRemId(), otherUserId, updateDto));
     }
 
+    /**
+     * 사용자가 정기송금 상태를 DELAYED로 바꿀 수 없는지 확인합니다.
+     * DELAYED는 배치가 다음 평일에 다시 실행하는 시스템 상태라, 사용자가 지정하면 예약일이 아닌 날 송금이 실행됩니다.
+     */
+    @Test
+    @Transactional
+    @DisplayName("정기송금 설정 수정 - 사용자는 DELAYED 상태로 바꿀 수 없다")
+    void updateScheduledRemittance_cannotSetDelayed() {
+        RegularRemittanceUpdateDto updateDto = new RegularRemittanceUpdateDto(
+                testAccount.getAccountNo(), BigDecimal.valueOf(1500), RegRemStatus.DELAYED, 25, null
+        );
+
+        CustomBaseException exception = assertThrows(CustomBaseException.class,
+                () -> regularRemittanceService.updateScheduledRemittance(testMonthlyRemittance.getRegRemId(), testUserId, updateDto));
+        assertThat(exception.getErrorCode()).isEqualTo(ErrorBaseCode.INVALID_REGULAR_REMITTANCE_STATUS);
+    }
+
     @Test
     @Transactional
     @DisplayName("정기송금 설정 삭제")

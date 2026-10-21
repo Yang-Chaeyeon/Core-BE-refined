@@ -73,8 +73,18 @@ public abstract class RegularRemittance {
         return date != null && date.equals(this.lastExecutedDate);
     }
 
+    /**
+     * 정기송금 실행일을 기록하고, 지연(DELAYED) 상태였다면 ACTIVE로 되돌립니다.
+     * 출금과 같은 트랜잭션에서 함께 저장되어야 하므로, 실행일 기록과 상태 복구를 한 메서드에서 처리합니다.
+     * (상태 복구만 따로 저장하다 실패하면, 출금된 정기송금이 DELAYED로 남아 다음 배치에서 다시 출금될 수 있음)
+     *
+     * @param date 실행일 (배치 기준일)
+     */
     public void markExecuted(LocalDate date) {
         this.lastExecutedDate = date;
+        if (this.regRemStatus == RegRemStatus.DELAYED) {
+            this.regRemStatus = RegRemStatus.ACTIVE;
+        }
     }
 
     public void updateDetails(

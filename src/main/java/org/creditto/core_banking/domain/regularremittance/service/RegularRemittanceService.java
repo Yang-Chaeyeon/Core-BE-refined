@@ -10,6 +10,7 @@ import org.creditto.core_banking.domain.recipient.entity.Recipient;
 import org.creditto.core_banking.domain.recipient.service.RecipientFactory;
 import org.creditto.core_banking.domain.regularremittance.dto.*;
 import org.creditto.core_banking.domain.regularremittance.entity.MonthlyRegularRemittance;
+import org.creditto.core_banking.domain.regularremittance.entity.RegRemStatus;
 import org.creditto.core_banking.domain.regularremittance.entity.RegularRemittance;
 import org.creditto.core_banking.domain.regularremittance.entity.WeeklyRegularRemittance;
 import org.creditto.core_banking.domain.regularremittance.repository.RegularRemittanceRepository;
@@ -201,13 +202,15 @@ public class RegularRemittanceService {
      */
     @Transactional
     public void updateScheduledRemittance(Long regRemId, Long userId, RegularRemittanceUpdateDto dto) {
-        RegularRemittance remittance = regularRemittanceRepository.findById(regRemId)
+        // 배치(markExecuted)와 동시에 수정되면 오래된 상태·실행일로 덮어써 중복 출금이 날 수 있어 행을 잠근다
+        RegularRemittance remittance = regularRemittanceRepository.findByIdForUpdate(regRemId)
                 .orElseThrow(() -> new CustomBaseException(ErrorBaseCode.NOT_FOUND_REGULAR_REMITTANCE));
         verifyUserOwnership(remittance.getAccount().getUserId(), userId);
 
         Account account = accountRepository.findByAccountNo(dto.getAccountNo())
                 .orElseThrow(() -> new CustomBaseException(ErrorBaseCode.NOT_FOUND_ACCOUNT));
         verifyUserOwnership(account.getUserId(), userId);
+        validateRequestedStatus(remittance.getRegRemStatus(), dto.getRegRemStatus());
 
         remittance.updateDetails(
                 account,
@@ -235,6 +238,20 @@ public class RegularRemittanceService {
         verifyUserOwnership(remittance.getAccount().getUserId(), userId);
 
         regularRemittanceRepository.delete(remittance);
+    }
+
+    /**
+     * 사용자가 요청한 정기송금 상태가 허용되는지 확인합니다.
+     * DELAYED는 배치가 "다음 평일에 다시 실행"할 대상으로 쓰는 시스템 상태라, 사용자가 새로 지정하면
+     * 예약일이 아닌 날 송금이 실행됩니다. 이미 DELAYED인 정기송금을 그대로 보내는 경우(다른 항목만 수정)는 허용합니다.
+     *
+     * @param currentStatus   현재 상태
+     * @param requestedStatus 요청한 상태
+     */
+    private void validateRequestedStatus(RegRemStatus currentStatus, RegRemStatus requestedStatus) {
+        if (requestedStatus == RegRemStatus.DELAYED && currentStatus != RegRemStatus.DELAYED) {
+            throw new CustomBaseException(ErrorBaseCode.INVALID_REGULAR_REMITTANCE_STATUS);
+        }
     }
 
     private void verifyUserOwnership(Long ownerId, Long requesterId) {

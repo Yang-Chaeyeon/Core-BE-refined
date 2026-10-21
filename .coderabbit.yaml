@@ -1,6 +1,7 @@
 language: "ko-KR"
+tone_instructions: "Be concise, direct, and constructive."
 reviews:
-  profile: "chill"
+  profile: "assertive"
   high_level_summary: false
   review_status: false
   poem: false
