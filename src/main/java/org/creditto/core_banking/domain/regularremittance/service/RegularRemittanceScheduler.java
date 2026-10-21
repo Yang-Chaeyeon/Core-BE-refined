@@ -141,24 +141,36 @@ public class RegularRemittanceScheduler {
                     return;
                 }
                 log.error("[RegularRemittanceScheduler] 정기 송금 실행에 실패하였습니다. remittanceId={}, error={}", remittance.getRegRemId(), e.getMessage());
-                updateStatus(remittance, RegRemStatus.DELAYED);
+                markDelayed(remittance, today);
             } catch (RuntimeException e) {
                 // 외부 API 오류, DB 락 대기 초과 등 예상치 못한 예외: 해당 건만 DELAYED 처리하고 다음 건 계속 실행
                 log.error("[RegularRemittanceScheduler] 정기 송금 실행 중 예상치 못한 오류가 발생했습니다. remittanceId={}",
                         remittance.getRegRemId(), e);
-                updateStatus(remittance, RegRemStatus.DELAYED);
+                markDelayed(remittance, today);
             }
         });
     }
 
-    // 상태 저장 실패가 배치 전체를 멈추지 않도록, 실패해도 로그만 남기고 다음 건으로 진행
-    private void updateStatus(RegularRemittance remittance, RegRemStatus status) {
+    /**
+     * 실패한 정기송금을 지연(DELAYED) 상태로 바꿔 다음 평일 배치에서 다시 실행되게 합니다.
+     * 일시정지·취소됐거나 그 사이 다른 실행에서 오늘 이미 성공한 정기송금은 바꾸지 않습니다.
+     * 상태 저장이 실패해도 배치 전체가 멈추지 않도록 로그만 남기고 다음 건으로 진행합니다.
+     *
+     * @param remittance 실패한 정기송금
+     * @param today 배치 기준일
+     */
+    private void markDelayed(RegularRemittance remittance, LocalDate today) {
         try {
-            regularRemittanceRepository.updateRegRemStatus(remittance.getRegRemId(), status);
-            remittance.updateRegRemStatus(status);
+            int updated = regularRemittanceRepository.markDelayedIfNotExecuted(remittance.getRegRemId(), today);
+            if (updated == 0) {
+                log.info("[RegularRemittanceScheduler] 일시정지·취소되었거나 오늘 이미 실행된 정기 송금이라 상태를 바꾸지 않습니다. remittanceId={}",
+                        remittance.getRegRemId());
+                return;
+            }
+            remittance.updateRegRemStatus(RegRemStatus.DELAYED);
         } catch (RuntimeException e) {
-            log.error("[RegularRemittanceScheduler] 정기 송금 상태 저장에 실패했습니다. remittanceId={}, status={}",
-                    remittance.getRegRemId(), status, e);
+            log.error("[RegularRemittanceScheduler] 정기 송금 상태 저장에 실패했습니다. remittanceId={}",
+                    remittance.getRegRemId(), e);
         }
     }
 }

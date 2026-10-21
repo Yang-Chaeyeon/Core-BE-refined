@@ -301,13 +301,54 @@ class RegularRemittanceBatchIntegrationTest extends IntegrationTestSupport {
 
         Account account = saveAccount(INITIAL_BALANCE);
         MonthlyRegularRemittance remittance = saveMonthlyRemittance(account, thursday);
-        regularRemittanceRepository.updateRegRemStatus(remittance.getRegRemId(), RegRemStatus.DELAYED);
+        regularRemittanceRepository.markDelayedIfNotExecuted(remittance.getRegRemId(), thursday);
 
         // 스케줄러를 거치지 않고 송금만 실행
         remittanceProcessorService.executeScheduled(ExecuteRemittanceCommand.of(remittance, thursday));
 
         assertThat(balanceOf(account)).isLessThan(INITIAL_BALANCE);
         assertThat(statusOf(remittance)).isEqualTo(RegRemStatus.ACTIVE);
+    }
+
+    /**
+     * 오늘 이미 성공한 정기송금은, 겹쳐 실행된 다른 배치의 실패 처리로 DELAYED가 되지 않는지 확인합니다.
+     * DELAYED로 덮어써지면 다음 평일 배치에서 다시 출금되기 때문입니다.
+     */
+    @Test
+    @DisplayName("오늘 이미 실행된 정기송금은 실패 처리로 DELAYED가 되지 않는다")
+    void executedToday_isNotMarkedDelayed() {
+        LocalDate friday = LocalDate.of(2026, 10, 23);
+
+        Account account = saveAccount(INITIAL_BALANCE);
+        MonthlyRegularRemittance remittance = saveMonthlyRemittance(account, friday);
+        remittanceProcessorService.executeScheduled(ExecuteRemittanceCommand.of(remittance, friday));
+
+        int updated = regularRemittanceRepository.markDelayedIfNotExecuted(remittance.getRegRemId(), friday);
+
+        assertThat(updated).isZero();
+        assertThat(statusOf(remittance)).isEqualTo(RegRemStatus.ACTIVE);
+    }
+
+    /**
+     * 사용자가 일시정지한 정기송금은 배치의 실패 처리로 DELAYED가 되지 않는지 확인합니다.
+     * DELAYED로 덮어써지면 사용자가 멈춘 송금이 다음 평일 배치에서 출금되기 때문입니다.
+     */
+    @Test
+    @DisplayName("일시정지된 정기송금은 실패 처리로 DELAYED가 되지 않는다")
+    void paused_isNotMarkedDelayed() {
+        LocalDate friday = LocalDate.of(2026, 10, 23);
+
+        Account account = saveAccount(INITIAL_BALANCE);
+        MonthlyRegularRemittance remittance = saveMonthlyRemittance(account, friday);
+        transactionTemplate.executeWithoutResult(status ->
+                monthlyRegularRemittanceRepository.findById(remittance.getRegRemId()).orElseThrow()
+                        .updateRegRemStatus(RegRemStatus.PAUSED)
+        );
+
+        int updated = regularRemittanceRepository.markDelayedIfNotExecuted(remittance.getRegRemId(), friday);
+
+        assertThat(updated).isZero();
+        assertThat(statusOf(remittance)).isEqualTo(RegRemStatus.PAUSED);
     }
 
     private void deposit(Account account, BigDecimal amount) {

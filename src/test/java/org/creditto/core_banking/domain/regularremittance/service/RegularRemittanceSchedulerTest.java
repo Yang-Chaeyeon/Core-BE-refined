@@ -101,7 +101,7 @@ class RegularRemittanceSchedulerTest {
 
         verify(remittanceProcessorService, times(CHUNK_SIZE + 1)).executeScheduled(any(ExecuteRemittanceCommand.class));
         // 성공 시 상태 복구는 송금 트랜잭션 안에서 처리하므로, 스케줄러는 상태를 따로 바꾸지 않음
-        verify(regularRemittanceRepository, never()).updateRegRemStatus(any(), any());
+        verify(regularRemittanceRepository, never()).markDelayedIfNotExecuted(any(), any());
     }
 
     @Test
