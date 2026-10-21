@@ -13,7 +13,6 @@ import org.creditto.core_banking.domain.regularremittance.repository.RegularRemi
 import org.creditto.core_banking.domain.regularremittance.repository.WeeklyRegularRemittanceRepository;
 import org.creditto.core_banking.global.response.error.ErrorBaseCode;
 import org.creditto.core_banking.global.response.exception.CustomBaseException;
-import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -22,7 +21,6 @@ import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
-import java.util.Set;
 import java.util.stream.IntStream;
 
 @Slf4j
@@ -55,10 +53,7 @@ public class RegularRemittanceScheduler {
                     .toList()
                 : List.of(nowDayOfMonth);
 
-        int page = 0;
         long total = 0L;
-
-        Page<MonthlyRegularRemittance> slice;
 
         // 정기 송금일이 주말일 경우 RegRem Status를 DELAYED로 업데이트
         if (now.getDayOfWeek() == DayOfWeek.SATURDAY || now.getDayOfWeek() == DayOfWeek.SUNDAY) {
@@ -74,21 +69,21 @@ public class RegularRemittanceScheduler {
             return;
         }
 
+        // 평일: 오늘 예약된 ACTIVE 정기송금 + 예약일과 관계없이 지연(DELAYED)된 정기송금을 실행
+        Long lastId = 0L;
+        List<MonthlyRegularRemittance> chunk;
         do {
+            chunk = monthlyRegularRemittanceRepository.findExecutableMonthlyRemittances(
+                    scheduledDates, lastId, PageRequest.of(0, SIZE)
+            );
 
-            // 평일의 경우 DELAYED & ACTIVE 정기송금을 실행되게 함
-            slice = monthlyRegularRemittanceRepository
-                    .findMonthlyRegularRemittanceByScheduledDateInAndRegRemStatusIn(
-                            scheduledDates,
-                            Set.of(RegRemStatus.ACTIVE, RegRemStatus.DELAYED),
-                            PageRequest.of(page, SIZE)
-                    );
+            executeRemittanceForRegRemList(chunk, now);
 
-            executeRemittanceForRegRemList(slice.getContent(), now);
-
-            total += slice.getNumberOfElements();
-            page++;
-        } while (slice.hasNext());
+            total += chunk.size();
+            if (!chunk.isEmpty()) {
+                lastId = chunk.get(chunk.size() - 1).getRegRemId();
+            }
+        } while (chunk.size() == SIZE);
 
         log.info("[RegularRemittanceScheduler {}/{}/{}] 월간 정기 해외송금 Job : 수행한 송금 수 = {}",
                 now.getYear(), now.getMonthValue(), now.getDayOfMonth(), total
@@ -104,24 +99,23 @@ public class RegularRemittanceScheduler {
                 now.getYear(), now.getMonthValue(), now.getDayOfMonth()
         );
 
-        int page = 0;
         long total = 0L;
 
-        Page<WeeklyRegularRemittance> slice;
-
+        // 오늘 요일로 예약된 ACTIVE 정기송금 + 요일과 관계없이 지연(DELAYED)된 정기송금을 실행
+        Long lastId = 0L;
+        List<WeeklyRegularRemittance> chunk;
         do {
-            slice = weeklyRegularRemittanceRepository
-                    .findWeeklyRegularRemittanceByScheduledDayAndRegRemStatusIn(
-                            dayOfWeek,
-                            Set.of(RegRemStatus.ACTIVE, RegRemStatus.DELAYED),
-                            PageRequest.of(page, SIZE)
-                    );
+            chunk = weeklyRegularRemittanceRepository.findExecutableWeeklyRemittances(
+                    dayOfWeek, lastId, PageRequest.of(0, SIZE)
+            );
 
-            executeRemittanceForRegRemList(slice.getContent(), now);
+            executeRemittanceForRegRemList(chunk, now);
 
-            total += slice.getNumberOfElements();
-            page++;
-        } while (slice.hasNext());
+            total += chunk.size();
+            if (!chunk.isEmpty()) {
+                lastId = chunk.get(chunk.size() - 1).getRegRemId();
+            }
+        } while (chunk.size() == SIZE);
 
         log.info("[RegularRemittanceScheduler {}/{}/{}] 주간 정기 해외송금 Job : 수행한 송금 수 = {}",
                 now.getYear(), now.getMonthValue(), now.getDayOfMonth(), total
@@ -138,11 +132,8 @@ public class RegularRemittanceScheduler {
 
             ExecuteRemittanceCommand remittanceCommand = ExecuteRemittanceCommand.of(remittance, today);
             try {
+                // 성공 시 DELAYED → ACTIVE 복구는 출금과 같은 트랜잭션에서 처리됨 (RegularRemittance.markExecuted)
                 remittanceProcessorService.executeScheduled(remittanceCommand);
-                // 연기된 작업 수행 후 ACTIVE로 수정
-                if (remittance.getRegRemStatus().equals(RegRemStatus.DELAYED)) {
-                    updateStatus(remittance, RegRemStatus.ACTIVE);
-                }
             } catch (CustomBaseException e) {
                 // 동시에 실행된 다른 배치가 먼저 처리한 경우: 실패가 아니므로 상태를 바꾸지 않음
                 if (e.getErrorCode() == ErrorBaseCode.REGULAR_REMITTANCE_ALREADY_EXECUTED) {

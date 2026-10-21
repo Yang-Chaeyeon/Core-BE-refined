@@ -21,9 +21,7 @@ import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageImpl;
-import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 
 import java.math.BigDecimal;
 import java.lang.reflect.Constructor;
@@ -33,7 +31,6 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Set;
 import java.util.stream.IntStream;
 
 import org.springframework.test.util.ReflectionTestUtils;
@@ -51,6 +48,7 @@ import static org.mockito.Mockito.verify;
 class RegularRemittanceSchedulerTest {
 
     private static final ZoneId ZONE_ID = ZoneId.of("Asia/Seoul");
+    private static final int CHUNK_SIZE = 1000;
 
     @Mock
     private RemittanceProcessorService remittanceProcessorService;
@@ -78,41 +76,32 @@ class RegularRemittanceSchedulerTest {
     }
 
     @Test
-    @DisplayName("월간 정기송금 - 평일에 ACTIVE/DELAYED 송금 수행")
+    @DisplayName("월간 정기송금 - 평일에 마지막 ID 이후를 이어서 조회하며 ACTIVE/DELAYED 송금 수행")
     void executeMonthlyRegularRemittance_weekdayProcessesActiveAndDelayed() {
         LocalDate fixedDate = LocalDate.of(2024, 7, 10);
         int scheduledDate = fixedDate.getDayOfMonth();
 
-        MonthlyRegularRemittance activeRemittance = createMonthlyRemittance(scheduledDate, RegRemStatus.ACTIVE);
-        MonthlyRegularRemittance delayedRemittance = createMonthlyRemittance(scheduledDate, RegRemStatus.DELAYED);
-        MonthlyRegularRemittance secondPageRemittance = createMonthlyRemittance(scheduledDate, RegRemStatus.ACTIVE);
-
-        List<MonthlyRegularRemittance> page0Content = List.of(activeRemittance, delayedRemittance);
-        List<MonthlyRegularRemittance> page1Content = List.of(secondPageRemittance);
-
-        Page<MonthlyRegularRemittance> page0 = new PageImpl<>(page0Content, PageRequest.of(0, 1000), 1500);
-        Page<MonthlyRegularRemittance> page1 = new PageImpl<>(page1Content, PageRequest.of(1, 1000), 1500);
+        // 첫 조회는 1000건(가득 참) → 마지막 ID(1000) 이후로 한 번 더 조회
+        List<MonthlyRegularRemittance> firstChunk = createMonthlyRemittances(CHUNK_SIZE, 1L, scheduledDate);
+        firstChunk.get(1).updateRegRemStatus(RegRemStatus.DELAYED);
+        List<MonthlyRegularRemittance> secondChunk = createMonthlyRemittances(1, CHUNK_SIZE + 1L, scheduledDate);
 
         try (MockedStatic<LocalDate> mockedLocalDate = Mockito.mockStatic(LocalDate.class)) {
             mockedLocalDate.when(() -> LocalDate.now(ZONE_ID)).thenReturn(fixedDate);
 
-            given(monthlyRegularRemittanceRepository.findMonthlyRegularRemittanceByScheduledDateInAndRegRemStatusIn(
-                    eq(List.of(scheduledDate)),
-                    eq(Set.of(RegRemStatus.ACTIVE, RegRemStatus.DELAYED)),
-                    any(PageRequest.class)
-            )).willReturn(page0, page1);
+            given(monthlyRegularRemittanceRepository.findExecutableMonthlyRemittances(
+                    eq(List.of(scheduledDate)), eq(0L), any(Pageable.class)
+            )).willReturn(firstChunk);
+            given(monthlyRegularRemittanceRepository.findExecutableMonthlyRemittances(
+                    eq(List.of(scheduledDate)), eq((long) CHUNK_SIZE), any(Pageable.class)
+            )).willReturn(secondChunk);
 
             scheduler.executeMonthlyRegularRemittance();
         }
 
-        verify(monthlyRegularRemittanceRepository, times(2))
-                .findMonthlyRegularRemittanceByScheduledDateInAndRegRemStatusIn(
-                        eq(List.of(scheduledDate)),
-                        eq(Set.of(RegRemStatus.ACTIVE, RegRemStatus.DELAYED)),
-                        any(PageRequest.class)
-                );
-        verify(remittanceProcessorService, times(3)).executeScheduled(any(ExecuteRemittanceCommand.class));
-        assertEquals(RegRemStatus.ACTIVE, delayedRemittance.getRegRemStatus());
+        verify(remittanceProcessorService, times(CHUNK_SIZE + 1)).executeScheduled(any(ExecuteRemittanceCommand.class));
+        // 성공 시 상태 복구는 송금 트랜잭션 안에서 처리하므로, 스케줄러는 상태를 따로 바꾸지 않음
+        verify(regularRemittanceRepository, never()).updateRegRemStatus(any(), any());
     }
 
     @Test
@@ -135,6 +124,7 @@ class RegularRemittanceSchedulerTest {
 
         verify(monthlyRegularRemittanceRepository)
                 .bulkUpdateRegRemStatusByScheduledDates(eq(List.of(scheduledDate)), eq(RegRemStatus.DELAYED), eq(RegRemStatus.ACTIVE));
+        verify(monthlyRegularRemittanceRepository, never()).findExecutableMonthlyRemittances(any(), any(), any());
         verify(remittanceProcessorService, never()).executeScheduled(any(ExecuteRemittanceCommand.class));
     }
 
@@ -143,27 +133,19 @@ class RegularRemittanceSchedulerTest {
     void executeMonthlyRegularRemittance_endOfMonthCoversRemainingDates() {
         LocalDate fixedDate = LocalDate.of(2024, 4, 30);
 
-        Page<MonthlyRegularRemittance> emptyPage = new PageImpl<>(List.of(), PageRequest.of(0, 1000), 0);
-
         try (MockedStatic<LocalDate> mockedLocalDate = Mockito.mockStatic(LocalDate.class)) {
             mockedLocalDate.when(() -> LocalDate.now(ZONE_ID)).thenReturn(fixedDate);
 
-            given(monthlyRegularRemittanceRepository.findMonthlyRegularRemittanceByScheduledDateInAndRegRemStatusIn(
-                    anyCollection(),
-                    eq(Set.of(RegRemStatus.ACTIVE, RegRemStatus.DELAYED)),
-                    any(PageRequest.class)
-            )).willReturn(emptyPage);
+            given(monthlyRegularRemittanceRepository.findExecutableMonthlyRemittances(
+                    anyCollection(), eq(0L), any(Pageable.class)
+            )).willReturn(List.of());
 
             scheduler.executeMonthlyRegularRemittance();
         }
 
         ArgumentCaptor<Collection<Integer>> scheduledCaptor = ArgumentCaptor.forClass(Collection.class);
         verify(monthlyRegularRemittanceRepository)
-                .findMonthlyRegularRemittanceByScheduledDateInAndRegRemStatusIn(
-                        scheduledCaptor.capture(),
-                        eq(Set.of(RegRemStatus.ACTIVE, RegRemStatus.DELAYED)),
-                        any(PageRequest.class)
-                );
+                .findExecutableMonthlyRemittances(scheduledCaptor.capture(), eq(0L), any(Pageable.class));
 
         List<Integer> capturedDates = new ArrayList<>(scheduledCaptor.getValue());
         assertEquals(List.of(30, 31), capturedDates);
@@ -173,82 +155,64 @@ class RegularRemittanceSchedulerTest {
     @DisplayName("월간 정기송금 스케쥴링 - 120건 수행")
     void executeMonthlyRegularRemittance_handlesMoreThanHundredItems() {
         LocalDate fixedDate = LocalDate.of(2024, 7, 15);
-        LocalDate newStartedAt = LocalDate.of(2024, 1, 1);
         int scheduledDate = fixedDate.getDayOfMonth();
 
-        List<MonthlyRegularRemittance> remittances = IntStream.range(0, 120)
-                .mapToObj(i -> MonthlyRegularRemittance.of(account, recipient, CurrencyCode.KRW, CurrencyCode.USD, BigDecimal.valueOf(1000), scheduledDate, newStartedAt))
-                .toList();
-
-        Page<MonthlyRegularRemittance> page = new PageImpl<>(remittances, PageRequest.of(0, 1000), remittances.size());
+        List<MonthlyRegularRemittance> remittances = createMonthlyRemittances(120, 1L, scheduledDate);
 
         try (MockedStatic<LocalDate> mockedLocalDate = Mockito.mockStatic(LocalDate.class)) {
             mockedLocalDate.when(() -> LocalDate.now(ZONE_ID)).thenReturn(fixedDate);
 
-            given(monthlyRegularRemittanceRepository.findMonthlyRegularRemittanceByScheduledDateInAndRegRemStatusIn(
-                    eq(List.of(scheduledDate)),
-                    eq(Set.of(RegRemStatus.ACTIVE, RegRemStatus.DELAYED)),
-                    any(PageRequest.class)
-            )).willReturn(page);
+            given(monthlyRegularRemittanceRepository.findExecutableMonthlyRemittances(
+                    eq(List.of(scheduledDate)), eq(0L), any(Pageable.class)
+            )).willReturn(remittances);
 
             scheduler.executeMonthlyRegularRemittance();
         }
 
+        // 1000건 미만이면 한 번만 조회
+        verify(monthlyRegularRemittanceRepository, times(1)).findExecutableMonthlyRemittances(any(), any(), any());
         verify(remittanceProcessorService, times(remittances.size())).executeScheduled(any(ExecuteRemittanceCommand.class));
     }
 
     @Test
-    @DisplayName("주간 정기송금 스케줄러 수행")
-    void executeWeeklyRegularRemittance_processesAllPages() {
+    @DisplayName("주간 정기송금 - 마지막 ID 이후를 이어서 조회하며 모두 수행")
+    void executeWeeklyRegularRemittance_processesAllChunks() {
         LocalDate fixedDate = LocalDate.of(2024, 7, 8);
         DayOfWeek scheduledDay = fixedDate.getDayOfWeek();
 
-        WeeklyRegularRemittance w1 = createWeeklyRemittance(scheduledDay);
-        WeeklyRegularRemittance w2 = createWeeklyRemittance(scheduledDay);
-        WeeklyRegularRemittance w3 = createWeeklyRemittance(scheduledDay);
-
-        List<WeeklyRegularRemittance> page0Content = List.of(w1, w2);
-        List<WeeklyRegularRemittance> page1Content = List.of(w3);
-
-        Page<WeeklyRegularRemittance> page0 = new PageImpl<>(page0Content, PageRequest.of(0, 1000), 1500);
-        Page<WeeklyRegularRemittance> page1 = new PageImpl<>(page1Content, PageRequest.of(1, 1000), 1500);
+        List<WeeklyRegularRemittance> firstChunk = createWeeklyRemittances(CHUNK_SIZE, 1L, scheduledDay);
+        List<WeeklyRegularRemittance> secondChunk = createWeeklyRemittances(1, CHUNK_SIZE + 1L, scheduledDay);
 
         try (MockedStatic<LocalDate> mockedLocalDate = Mockito.mockStatic(LocalDate.class)) {
             mockedLocalDate.when(() -> LocalDate.now(ZONE_ID)).thenReturn(fixedDate);
 
-            given(weeklyRegularRemittanceRepository.findWeeklyRegularRemittanceByScheduledDayAndRegRemStatusIn(
-                    eq(scheduledDay),
-                    eq(Set.of(RegRemStatus.ACTIVE, RegRemStatus.DELAYED)),
-                    any(PageRequest.class)
-            )).willReturn(page0, page1);
+            given(weeklyRegularRemittanceRepository.findExecutableWeeklyRemittances(
+                    eq(scheduledDay), eq(0L), any(Pageable.class)
+            )).willReturn(firstChunk);
+            given(weeklyRegularRemittanceRepository.findExecutableWeeklyRemittances(
+                    eq(scheduledDay), eq((long) CHUNK_SIZE), any(Pageable.class)
+            )).willReturn(secondChunk);
 
             scheduler.executeWeeklyRegularRemittance();
         }
 
-        verify(remittanceProcessorService, times(page0Content.size() + page1Content.size())).executeScheduled(any(ExecuteRemittanceCommand.class));
+        verify(remittanceProcessorService, times(CHUNK_SIZE + 1)).executeScheduled(any(ExecuteRemittanceCommand.class));
     }
 
     @Test
     @DisplayName("주간 정기송금 스케쥴링 - 120건 수행")
     void executeWeeklyRegularRemittance_handlesMoreThanHundredItems() {
         LocalDate fixedDate = LocalDate.of(2024, 7, 15);
-        LocalDate newStartedAt = LocalDate.of(2024, 1, 1);
         DayOfWeek scheduledDay = fixedDate.getDayOfWeek();
 
-        List<WeeklyRegularRemittance> remittances = IntStream.range(0, 120)
-                .mapToObj(i -> WeeklyRegularRemittance.of(account, recipient, CurrencyCode.KRW, CurrencyCode.USD, BigDecimal.valueOf(3000), scheduledDay, newStartedAt))
-                .toList();
-
-        Page<WeeklyRegularRemittance> page = new PageImpl<>(remittances, PageRequest.of(0, 1000), remittances.size());
+        List<WeeklyRegularRemittance> remittances = createWeeklyRemittances(120, 1L, scheduledDay);
 
         try (MockedStatic<LocalDate> mockedLocalDate = Mockito.mockStatic(LocalDate.class)) {
             mockedLocalDate.when(() -> LocalDate.now(ZONE_ID)).thenReturn(fixedDate);
 
-            given(weeklyRegularRemittanceRepository.findWeeklyRegularRemittanceByScheduledDayAndRegRemStatusIn(
-                    eq(scheduledDay),
-                    eq(Set.of(RegRemStatus.ACTIVE, RegRemStatus.DELAYED)),
-                    any(PageRequest.class)
-            )).willReturn(page);
+            given(weeklyRegularRemittanceRepository.findExecutableWeeklyRemittances(
+                    eq(scheduledDay), eq(0L), any(Pageable.class)
+            )).willReturn(remittances);
 
             scheduler.executeWeeklyRegularRemittance();
         }
@@ -256,31 +220,30 @@ class RegularRemittanceSchedulerTest {
         verify(remittanceProcessorService, times(remittances.size())).executeScheduled(any(ExecuteRemittanceCommand.class));
     }
 
-    private MonthlyRegularRemittance createMonthlyRemittance(int scheduledDate, RegRemStatus status) {
-        MonthlyRegularRemittance remittance = MonthlyRegularRemittance.of(
-                account,
-                recipient,
-                CurrencyCode.KRW,
-                CurrencyCode.USD,
-                BigDecimal.valueOf(1000),
-                scheduledDate,
-                LocalDate.of(2024, 1, 1)
-
-        );
-        remittance.updateRegRemStatus(status);
-        return remittance;
+    private List<MonthlyRegularRemittance> createMonthlyRemittances(int count, long startId, int scheduledDate) {
+        return IntStream.range(0, count)
+                .mapToObj(i -> {
+                    MonthlyRegularRemittance remittance = MonthlyRegularRemittance.of(
+                            account, recipient, CurrencyCode.KRW, CurrencyCode.USD,
+                            BigDecimal.valueOf(1000), scheduledDate, LocalDate.of(2024, 1, 1)
+                    );
+                    ReflectionTestUtils.setField(remittance, "regRemId", startId + i);
+                    return remittance;
+                })
+                .toList();
     }
 
-    private WeeklyRegularRemittance createWeeklyRemittance(DayOfWeek scheduledDay) {
-        return WeeklyRegularRemittance.of(
-                account,
-                recipient,
-                CurrencyCode.KRW,
-                CurrencyCode.USD,
-                BigDecimal.valueOf(3000),
-                scheduledDay,
-                LocalDate.of(2024, 1, 1)
-        );
+    private List<WeeklyRegularRemittance> createWeeklyRemittances(int count, long startId, DayOfWeek scheduledDay) {
+        return IntStream.range(0, count)
+                .mapToObj(i -> {
+                    WeeklyRegularRemittance remittance = WeeklyRegularRemittance.of(
+                            account, recipient, CurrencyCode.KRW, CurrencyCode.USD,
+                            BigDecimal.valueOf(3000), scheduledDay, LocalDate.of(2024, 1, 1)
+                    );
+                    ReflectionTestUtils.setField(remittance, "regRemId", startId + i);
+                    return remittance;
+                })
+                .toList();
     }
 
     private Recipient createRecipient() {
