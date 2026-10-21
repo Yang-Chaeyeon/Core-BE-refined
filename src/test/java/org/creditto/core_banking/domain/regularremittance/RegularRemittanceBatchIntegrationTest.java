@@ -10,7 +10,10 @@ import org.creditto.core_banking.domain.recipient.entity.Recipient;
 import org.creditto.core_banking.domain.recipient.repository.RecipientRepository;
 import org.creditto.core_banking.domain.regularremittance.entity.MonthlyRegularRemittance;
 import org.creditto.core_banking.domain.regularremittance.entity.RegRemStatus;
+import org.creditto.core_banking.domain.overseasremittance.dto.ExecuteRemittanceCommand;
+import org.creditto.core_banking.domain.overseasremittance.service.RemittanceProcessorService;
 import org.creditto.core_banking.domain.regularremittance.repository.MonthlyRegularRemittanceRepository;
+import org.creditto.core_banking.domain.regularremittance.repository.RegularRemittanceRepository;
 import org.creditto.core_banking.domain.regularremittance.service.RegularRemittanceScheduler;
 import org.creditto.core_banking.domain.remittancefee.entity.FlatServiceFee;
 import org.creditto.core_banking.domain.remittancefee.entity.NetworkFee;
@@ -96,6 +99,12 @@ class RegularRemittanceBatchIntegrationTest extends IntegrationTestSupport {
 
     @Autowired
     private TransactionTemplate transactionTemplate;
+
+    @Autowired
+    private RegularRemittanceRepository regularRemittanceRepository;
+
+    @Autowired
+    private RemittanceProcessorService remittanceProcessorService;
 
     private Recipient recipient;
 
@@ -276,6 +285,26 @@ class RegularRemittanceBatchIntegrationTest extends IntegrationTestSupport {
 
         deposit(account, INITIAL_BALANCE);
         runMonthlyBatch(wednesday);
+
+        assertThat(balanceOf(account)).isLessThan(INITIAL_BALANCE);
+        assertThat(statusOf(remittance)).isEqualTo(RegRemStatus.ACTIVE);
+    }
+
+    /**
+     * 지연(DELAYED) 정기송금이 성공하면, 출금과 같은 트랜잭션 안에서 ACTIVE로 복구되는지 확인합니다.
+     * 스케줄러가 별도로 상태를 바꾸지 않아도 복구되어야, 상태 저장 실패로 DELAYED가 남아 다음 날 중복 출금되는 일이 없습니다.
+     */
+    @Test
+    @DisplayName("지연된 정기송금이 성공하면 출금과 같은 트랜잭션에서 ACTIVE로 복구된다")
+    void delayedRemittance_isRestoredToActiveWithinSameTransaction() {
+        LocalDate thursday = LocalDate.of(2026, 10, 22);
+
+        Account account = saveAccount(INITIAL_BALANCE);
+        MonthlyRegularRemittance remittance = saveMonthlyRemittance(account, thursday);
+        regularRemittanceRepository.updateRegRemStatus(remittance.getRegRemId(), RegRemStatus.DELAYED);
+
+        // 스케줄러를 거치지 않고 송금만 실행
+        remittanceProcessorService.executeScheduled(ExecuteRemittanceCommand.of(remittance, thursday));
 
         assertThat(balanceOf(account)).isLessThan(INITIAL_BALANCE);
         assertThat(statusOf(remittance)).isEqualTo(RegRemStatus.ACTIVE);
