@@ -73,6 +73,20 @@ tasks.register('integrationTest', Test) {
 	classpath = sourceSets.test.runtimeClasspath
 	useJUnitPlatform {
 		includeTags 'integration'
+		excludeTags 'performance'
 	}
 	shouldRunAfter tasks.named('test')
+}
+
+tasks.register('performanceTest', Test) {
+	description = '실행 시간이 긴 성능 측정 테스트(@Tag("performance"))만 실행합니다.'
+	group = 'verification'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform {
+		includeTags 'performance'
+	}
+	testLogging {
+		showStandardStreams = true
+	}
 }
