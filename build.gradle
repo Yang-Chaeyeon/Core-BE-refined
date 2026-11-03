@@ -73,6 +73,22 @@ tasks.register('integrationTest', Test) {
 	classpath = sourceSets.test.runtimeClasspath
 	useJUnitPlatform {
 		includeTags 'integration'
+		excludeTags 'performance'
 	}
 	shouldRunAfter tasks.named('test')
+}
+
+tasks.register('performanceTest', Test) {
+	description = '실행 시간이 긴 성능 측정 테스트(@Tag("performance"))만 실행합니다.'
+	group = 'verification'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform {
+		includeTags 'performance'
+	}
+	// 측정용 태스크라 입력이 같아도 UP-TO-DATE로 건너뛰지 않고 매번 실행
+	outputs.upToDateWhen { false }
+	testLogging {
+		showStandardStreams = true
+	}
 }
