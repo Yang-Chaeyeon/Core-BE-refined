@@ -155,11 +155,13 @@ class RegularRemittanceBatchPerformanceTest extends IntegrationTestSupport {
                 }
                 long start = System.nanoTime();
                 try {
-                    BigDecimal balance = transactionTemplate.execute(status ->
-                            accountRepository.findByIdForUpdate(firstAccount.getId()).orElseThrow().getBalance());
-                    lockAcquiredAt = System.nanoTime();
-                    lockWait = Duration.ofNanos(lockAcquiredAt - start);
-                    return balance;
+                    return transactionTemplate.execute(status -> {
+                        Account locked = accountRepository.findByIdForUpdate(firstAccount.getId()).orElseThrow();
+                        // 커밋 시간을 빼고 잠금을 얻은 순간을 기록하기 위해 트랜잭션 안에서 잰다
+                        lockAcquiredAt = System.nanoTime();
+                        lockWait = Duration.ofNanos(lockAcquiredAt - start);
+                        return locked.getBalance();
+                    });
                 } catch (RuntimeException e) {
                     lockWait = Duration.ofNanos(System.nanoTime() - start);
                     lockFailure = e.getClass().getSimpleName();
