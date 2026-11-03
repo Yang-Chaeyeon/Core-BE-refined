@@ -109,6 +109,7 @@ class RegularRemittanceBatchPerformanceTest extends IntegrationTestSupport {
     // 측정 스레드가 기록하고 테스트 스레드가 읽으므로 volatile
     private volatile Duration lockWait;
     private volatile String lockFailure;
+    private volatile long lockAcquiredAt;
 
     @BeforeEach
     void setUp() {
@@ -128,12 +129,13 @@ class RegularRemittanceBatchPerformanceTest extends IntegrationTestSupport {
 
     /**
      * 1000건 배치에서 첫 번째 송금이 끝난 직후, 그 계좌에 사용자 요청처럼 잠금을 요청해 대기 시간을 측정합니다.
-     * 측정 결과는 표준 출력에 남기고, 잠금을 1초 안에 얻는지 검증합니다.
+     * 측정 결과는 표준 출력에 남기고, 잠금을 배치 도중에 1초 안에 얻는지와 1000건이 모두 처리됐는지 검증합니다.
      */
     @Test
     @DisplayName("1000건 배치 중에도 처리가 끝난 계좌의 잠금은 1초 안에 얻을 수 있다")
     void processedAccount_isAvailableDuringLargeBatch() throws Exception {
-        Account firstAccount = saveAccountsAndRemittances();
+        List<Account> accounts = saveAccountsAndRemittances();
+        Account firstAccount = accounts.get(0);
 
         // 2번째 송금의 환율 조회가 시작되면 = 1번째 송금 처리가 끝난 시점
         CountDownLatch firstItemDone = new CountDownLatch(1);
@@ -155,7 +157,8 @@ class RegularRemittanceBatchPerformanceTest extends IntegrationTestSupport {
                 try {
                     BigDecimal balance = transactionTemplate.execute(status ->
                             accountRepository.findByIdForUpdate(firstAccount.getId()).orElseThrow().getBalance());
-                    lockWait = Duration.ofNanos(System.nanoTime() - start);
+                    lockAcquiredAt = System.nanoTime();
+                    lockWait = Duration.ofNanos(lockAcquiredAt - start);
                     return balance;
                 } catch (RuntimeException e) {
                     lockWait = Duration.ofNanos(System.nanoTime() - start);
@@ -166,13 +169,22 @@ class RegularRemittanceBatchPerformanceTest extends IntegrationTestSupport {
 
             long batchStart = System.nanoTime();
             runMonthlyBatch();
-            Duration batchDuration = Duration.ofNanos(System.nanoTime() - batchStart);
+            long batchEnd = System.nanoTime();
+            Duration batchDuration = Duration.ofNanos(batchEnd - batchStart);
+
+            // 배치가 끝났는데 신호가 없으면 측정 자체가 성립하지 않으므로 기다리지 않고 바로 실패
+            assertThat(firstItemDone.getCount())
+                    .as("배치가 2건 이상 처리되지 않아 측정 신호가 오지 않았습니다.")
+                    .isZero();
 
             BigDecimal balance = null;
             try {
-                balance = balanceSeenByUser.get(5, TimeUnit.MINUTES);
-            } catch (ExecutionException ignored) {
-                // 잠금 대기 초과 등으로 실패한 경우에도 측정값은 아래에서 출력한다
+                balance = balanceSeenByUser.get(1, TimeUnit.MINUTES);
+            } catch (ExecutionException e) {
+                // 잠금 요청 실패(대기 초과 등)는 아래에서 측정값을 출력한 뒤 단언으로 실패시키고, 그 외 실패는 원인과 함께 바로 실패
+                if (lockFailure == null) {
+                    throw new AssertionError("측정 스레드가 실패했습니다.", e.getCause());
+                }
             }
 
             System.out.printf("%n[성능 측정] 정기송금 %d건 배치%n", REMITTANCE_COUNT);
@@ -183,16 +195,30 @@ class RegularRemittanceBatchPerformanceTest extends IntegrationTestSupport {
             assertThat(lockFailure).as("처리 끝난 계좌의 잠금 요청이 실패했습니다.").isNull();
             // 잔액이 이미 줄어 있어야 '처리가 끝난 계좌'를 측정한 것이다
             assertThat(balance).isLessThan(INITIAL_BALANCE);
+            // 배치가 끝나기 전에 잠금을 얻었어야 '배치 도중'의 대기 시간이다
+            assertThat(lockAcquiredAt).as("잠금을 배치가 끝난 뒤에 얻었습니다.").isLessThan(batchEnd);
             assertThat(lockWait).isLessThan(EXPECTED_MAX_LOCK_WAIT);
+            assertThat(countProcessed(accounts)).as("1000건이 모두 출금되지 않았습니다.").isEqualTo(REMITTANCE_COUNT);
         } finally {
             executor.shutdownNow();
         }
     }
 
     /**
-     * 계좌 1000개와 계좌마다 정기송금 1건을 저장하고, 가장 먼저 처리될(가장 먼저 저장한) 계좌를 반환합니다.
+     * 잔액이 초기 잔액보다 줄어든(= 정기송금이 출금된) 계좌 수를 셉니다.
      */
-    private Account saveAccountsAndRemittances() {
+    private long countProcessed(List<Account> accounts) {
+        List<Long> ids = accounts.stream().map(Account::getId).toList();
+        return accountRepository.findAllById(ids).stream()
+                .filter(account -> account.getBalance().compareTo(INITIAL_BALANCE) < 0)
+                .count();
+    }
+
+    /**
+     * 계좌 1000개와 계좌마다 정기송금 1건을 저장하고, 저장한 계좌 목록을 반환합니다.
+     * 첫 번째 계좌가 배치에서 가장 먼저 처리됩니다(정기송금 ID 오름차순 처리).
+     */
+    private List<Account> saveAccountsAndRemittances() {
         List<Account> accounts = new ArrayList<>();
         for (int i = 0; i < REMITTANCE_COUNT; i++) {
             accounts.add(Account.of(null, "encoded-password", "성능 측정 계좌",
@@ -214,7 +240,7 @@ class RegularRemittanceBatchPerformanceTest extends IntegrationTestSupport {
         }
         monthlyRegularRemittanceRepository.saveAll(remittances);
 
-        return savedAccounts.get(0);
+        return savedAccounts;
     }
 
     private void runMonthlyBatch() {

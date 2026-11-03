@@ -86,6 +86,8 @@ tasks.register('performanceTest', Test) {
 	useJUnitPlatform {
 		includeTags 'performance'
 	}
+	// 측정용 태스크라 입력이 같아도 UP-TO-DATE로 건너뛰지 않고 매번 실행
+	outputs.upToDateWhen { false }
 	testLogging {
 		showStandardStreams = true
 	}
