@@ -12,12 +12,15 @@ import org.creditto.core_banking.domain.account.service.strategy.TransactionStra
 import org.creditto.core_banking.domain.transaction.entity.TxnType;
 import org.creditto.core_banking.global.response.error.ErrorBaseCode;
 import org.creditto.core_banking.global.response.exception.CustomBaseException;
+import org.creditto.core_banking.global.util.CacheKeyUtil;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 @Service
 @RequiredArgsConstructor
@@ -29,6 +32,7 @@ public class AccountService {
     private final PasswordValidator passwordValidator;
     private final PasswordEncoder passwordEncoder;
     private final AccountLockService accountLockService;
+    private final RedisTemplate<String, Object> redisTemplate;
 
 
     /**
@@ -59,6 +63,10 @@ public class AccountService {
         );
 
         Account savedAccount = accountRepository.save(account);
+
+        // 새 계좌 생성 시, 총 잔액 캐시 무효화
+        redisTemplate.delete(CacheKeyUtil.getTotalBalanceKey(userId));
+
         return AccountRes.from(savedAccount);
     }
 
@@ -122,7 +130,24 @@ public class AccountService {
                 .toList();
     }
 
+    /**
+     * 사용자의 전체 계좌 수와 총 잔액을 조회합니다.
+     * Redis에 캐시가 있으면 바로 반환하고, 없으면 DB에서 합산한 뒤 10분 동안 캐싱합니다.
+     *
+     * @param userId 사용자 ID
+     * @return 계좌 수와 총 잔액
+     */
     public AccountSummaryRes getTotalBalanceByUserId(Long userId) {
-        return accountRepository.findAccountSummaryByUserId(userId);
+        String key = CacheKeyUtil.getTotalBalanceKey(userId);
+        Object cachedValue = redisTemplate.opsForValue().get(key);
+
+        if (cachedValue instanceof AccountSummaryRes summary) {
+            return summary;
+        }
+
+        AccountSummaryRes summary = accountRepository.findAccountSummaryByUserId(userId);
+        redisTemplate.opsForValue().set(key, summary, 10, TimeUnit.MINUTES);
+
+        return summary;
     }
 }
