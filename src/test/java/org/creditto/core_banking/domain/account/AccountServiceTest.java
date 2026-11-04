@@ -23,6 +23,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 import java.math.BigDecimal;
@@ -56,6 +58,12 @@ class AccountServiceTest {
 
     @Mock
     private AccountLockService accountLockService;
+
+    @Mock
+    private RedisTemplate<String, Object> redisTemplate;
+
+    @Mock
+    private ValueOperations<String, Object> valueOperations;
 
     @InjectMocks
     private AccountService accountService;
@@ -275,6 +283,8 @@ class AccountServiceTest {
     void getTotalBalanceByUserId_returnsAggregateBalanceFromRepository() {
         Long userId = 7L;
 
+        // 캐시 미스 상황: Redis에 값이 없어 DB에서 조회
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         AccountSummaryRes expected = new AccountSummaryRes(2, BigDecimal.valueOf(50000));
         when(accountRepository.findAccountSummaryByUserId(userId)).thenReturn(expected);
 
@@ -293,6 +303,8 @@ class AccountServiceTest {
     @DisplayName("잔액이 0인 경우 0을 반환")
     void getTotalBalanceByUserId_returnsZeroWhenRepositoryReportsZero() {
         Long userId = 15L;
+        // 캐시 미스 상황: Redis에 값이 없어 DB에서 조회
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         when(accountRepository.findAccountSummaryByUserId(userId)).thenReturn(new AccountSummaryRes(0, BigDecimal.ZERO));
 
         AccountSummaryRes res = accountService.getTotalBalanceByUserId(userId);
